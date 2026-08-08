@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import express from 'express';
 import { config, assertConfigured, redirectUri } from './config.js';
 import { ensureApiKey, getApiKey, requireApiKey } from './auth.js';
+import { COMMON_COMMANDS, proxyReady, sendCommand } from './commands.js';
 import { ensureKeys, publicKeyPath } from './keys.js';
 import { loadTokens, clearTokens } from './tokenStore.js';
 import {
@@ -63,6 +64,7 @@ pre{background:#f4f4f4;padding:10px;border-radius:6px;overflow-x:auto;white-spac
   <li>환경변수: ${missing.length ? `❌ 누락 — ${missing.join(', ')}` : '✅ 설정됨'}</li>
   <li>공개키 파일: ${keyExists ? '✅ 자동 생성됨' : '❌ 없음 — 컨테이너 로그 확인 필요'}</li>
   <li>Tesla 계정 토큰: ${tokens ? '✅ 발급됨' : '❌ 없음'}</li>
+  <li>명령 서명 프록시: ${proxyReady() ? '✅ 준비됨' : '❌ 미실행 (명령 불가, 조회는 가능)'}</li>
   <li>리전: <code>${config.region}</code> / 도메인: <code>${domain}</code></li>
 </ul>
 <h2>설정 순서</h2>
@@ -77,6 +79,19 @@ pre{background:#f4f4f4;padding:10px;border-radius:6px;overflow-x:auto;white-spac
   <li><a href="/auth/login">Tesla 계정 로그인</a> — 사용자 토큰 발급</li>
   <li><a href="/api/vehicles">차량 목록 조회</a></li>
 </ol>
+<h2>차량 명령</h2>
+<p>명령을 보내려면 차량에 <strong>가상 키</strong>가 등록되어 있어야 합니다.
+Tesla 앱이 설치된 휴대폰에서 아래 링크를 열고 차량에서 승인하세요. 차량마다 한 번씩 필요합니다.</p>
+<pre>https://tesla.com/_ak/${domain}</pre>
+<p>등록 후에는 아래처럼 호출합니다. 자주 쓰는 명령:
+${COMMON_COMMANDS.map(([c, label]) => `<code>${c}</code>(${label})`).join(', ')}</p>
+<pre>curl -X POST -H "X-API-Key: ${getApiKey()}" \\
+  https://${domain}/api/vehicles/&lt;차량ID&gt;/command/door_lock
+
+curl -X POST -H "X-API-Key: ${getApiKey()}" -H "Content-Type: application/json" \\
+  -d '{"percent":80}' \\
+  https://${domain}/api/vehicles/&lt;차량ID&gt;/command/set_charge_limit</pre>
+
 <h2>터미널에서 호출하기</h2>
 <p>이 페이지는 API 키로 보호됩니다. 브라우저는 쿠키로 유지되지만,
 터미널에서는 헤더를 함께 보내야 합니다.</p>
@@ -186,6 +201,18 @@ app.post('/api/vehicles/:id/wake_up', async (req, res) => {
     res.status(result.status).json(result.body);
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// 차량 명령 — 서명 프록시를 거쳐 전달합니다.
+// 예: POST /api/vehicles/<id>/command/door_lock
+//     POST /api/vehicles/<id>/command/set_charge_limit  {"percent": 80}
+app.post('/api/vehicles/:id/command/:command', async (req, res) => {
+  try {
+    const result = await sendCommand(req.params.id, req.params.command, req.body);
+    res.status(result.status).json(result.body);
+  } catch (e) {
+    res.status(502).json({ error: e.message });
   }
 });
 

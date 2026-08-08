@@ -26,7 +26,12 @@ export const config = {
   dataDir: process.env.DATA_DIR || '/data',
   // 비워두면 첫 실행 시 자동 생성되어 data/api-key.txt 에 보관됩니다.
   apiKey: (process.env.API_KEY || '').trim(),
+  // 명령 서명 프록시 (tesla-http-proxy). 도커 내부 네트워크에서만 접근합니다.
+  proxyUrl: process.env.COMMAND_PROXY_URL || 'https://tesla-http-proxy:4443',
 };
+
+// 프록시가 생성한 자체 서명 인증서. 이 파일로 프록시를 검증합니다.
+export const proxyCaPath = `${config.dataDir}/proxy/cert.pem`;
 
 export function redirectUri() {
   return `https://${config.domain}/auth/callback`;

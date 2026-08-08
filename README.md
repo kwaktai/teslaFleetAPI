@@ -6,6 +6,8 @@
 - 파트너(도메인) 등록 API
 - Tesla 계정 OAuth 로그인 + 토큰 자동 갱신
 - 차량 목록/상태 조회, 깨우기(wake_up) API
+- 차량 명령(잠금·공조·충전) — 서명 프록시 포함
+- API 키 기반 접근 제어
 
 ## 사전 준비물
 
@@ -143,22 +145,57 @@ curl https://<내도메인>/api/vehicles/<id>/vehicle_data
 | GET | `/api/vehicles` | 차량 목록 |
 | GET | `/api/vehicles/:id/vehicle_data` | 차량 상세 상태 |
 | POST | `/api/vehicles/:id/wake_up` | 차량 깨우기 |
+| POST | `/api/vehicles/:id/command/:command` | 차량 명령 (서명 프록시 경유, ID·VIN 모두 가능) |
 | GET | `/healthz` | 헬스체크 |
 
 `/.well-known/...`, `/auth/callback`, `/healthz` 를 제외한 모든 경로는 API 키가 필요합니다.
 
-## 차량 명령(잠금/공조 등)에 대한 참고
+## 7단계 — 차량 명령 (잠금/공조/충전)
 
-2021년 이후 차량(Model 3/Y 대부분, S/X 2021+)에 **명령을 보내려면** 개인키로 서명하는
-[Tesla Vehicle Command Proxy](https://github.com/teslamotors/vehicle-command)가 추가로 필요하며,
-차량 화면에서 가상 키(공개키)를 차량에 등록하는 절차가 있습니다:
+문 잠금이나 공조 같은 **명령**은 Tesla가 개인키 서명을 요구합니다.
+`docker-compose.yml` 에 포함된 `tesla-http-proxy`
+([Tesla 공식 vehicle-command](https://github.com/teslamotors/vehicle-command))가 이 서명을 담당합니다.
+
+프록시는 **호스트 포트를 열지 않고** 도커 내부 네트워크에만 노출되며,
+`data/keys/private-key.pem` 을 그대로 사용합니다. 별도 설정은 없습니다.
+
+### 가상 키 등록 (차량마다 한 번)
+
+Tesla 앱(4.27.3 이상)이 설치된 휴대폰에서 아래 링크를 열고 차량에서 승인하세요.
 
 ```
-https://tesla.com/_ak/<내도메인>   ← 이 링크를 Tesla 앱이 설치된 휴대폰에서 열기
+https://tesla.com/_ak/<내도메인>
 ```
 
-단순 **조회(상태/위치/충전 정보)** 는 이 서버만으로 충분합니다. 명령 기능이 필요하면
-`vehicle-command` 프록시를 같은 `data/keys` 개인키로 연동해 확장할 수 있습니다.
+이 절차를 건너뛰면 명령이 권한 오류로 실패합니다. 조회 기능에는 영향이 없습니다.
+
+### 사용법
+
+```sh
+# 문 잠금
+curl -X POST -H "X-API-Key: <API_KEY>" \
+  https://<내도메인>/api/vehicles/<차량ID 또는 VIN>/command/door_lock
+
+# 충전 한도 80%
+curl -X POST -H "X-API-Key: <API_KEY>" -H "Content-Type: application/json" \
+  -d '{"percent":80}' \
+  https://<내도메인>/api/vehicles/<차량ID 또는 VIN>/command/set_charge_limit
+```
+
+프록시 자체는 VIN만 받지만, 서버가 차량 ID를 VIN으로 자동 변환하므로 **둘 중 아무거나** 넣어도 됩니다.
+
+자주 쓰는 명령: `door_lock`, `door_unlock`, `auto_conditioning_start`, `auto_conditioning_stop`,
+`set_temps`, `charge_start`, `charge_stop`, `set_charge_limit`, `flash_lights`, `honk_horn`.
+목록에 없는 명령도 그대로 전달되므로 Fleet API 문서의 다른 명령도 사용할 수 있습니다.
+
+### 명령이 실패할 때
+
+| 증상 | 원인 |
+|---|---|
+| `프록시 인증서를 찾을 수 없습니다` | `tesla-http-proxy` 컨테이너 미실행 → `docker-compose ps` 확인 |
+| 권한/서명 오류 | 가상 키 미등록 → 위 `tesla.com/_ak/...` 링크로 등록 |
+| 응답 시간 초과 | 차량 절전 상태 → `wake_up` 후 재시도 |
+| `unauthorized` | 개발자 포털에서 `vehicle_cmds` 권한 미선택 → 권한 추가 후 재로그인 |
 
 ## 접근 제어 (API 키)
 
