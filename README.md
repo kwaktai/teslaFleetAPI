@@ -145,6 +145,8 @@ curl https://<내도메인>/api/vehicles/<id>/vehicle_data
 | POST | `/api/vehicles/:id/wake_up` | 차량 깨우기 |
 | GET | `/healthz` | 헬스체크 |
 
+`/.well-known/...`, `/auth/callback`, `/healthz` 를 제외한 모든 경로는 API 키가 필요합니다.
+
 ## 차량 명령(잠금/공조 등)에 대한 참고
 
 2021년 이후 차량(Model 3/Y 대부분, S/X 2021+)에 **명령을 보내려면** 개인키로 서명하는
@@ -158,12 +160,47 @@ https://tesla.com/_ak/<내도메인>   ← 이 링크를 Tesla 앱이 설치된 
 단순 **조회(상태/위치/충전 정보)** 는 이 서버만으로 충분합니다. 명령 기능이 필요하면
 `vehicle-command` 프록시를 같은 `data/keys` 개인키로 연동해 확장할 수 있습니다.
 
+## 접근 제어 (API 키)
+
+서버는 인터넷에 노출되므로 아래 세 경로를 제외한 **모든 요청에 API 키를 요구**합니다.
+이 세 경로는 Tesla가 직접 호출하거나 상태 확인용이라 열려 있어야 합니다.
+
+- `/.well-known/appspecific/com.tesla.3p.public-key.pem` — Tesla가 공개키를 가져감
+- `/auth/callback` — Tesla가 로그인 후 브라우저를 되돌림 (`state` 값으로 별도 검증)
+- `/healthz` — 헬스체크
+
+### 키 확인
+
+`.env` 의 `API_KEY` 를 비워두면 첫 실행 시 자동 생성됩니다.
+
+```sh
+sudo docker exec tesla-fleet-api cat /data/api-key.txt
+```
+
+컨테이너 로그(`docker-compose logs`)에도 접속용 주소가 함께 출력됩니다.
+
+### 사용법
+
+**브라우저** — 아래 주소로 한 번 접속하면 쿠키가 저장되어 이후에는 그냥 도메인만 입력하면 됩니다.
+키는 주소창에 남지 않도록 접속 직후 제거됩니다.
+
+```
+https://<내도메인>/?key=<API_KEY>
+```
+
+**터미널** — `X-API-Key` 헤더를 함께 보냅니다.
+
+```sh
+curl -H "X-API-Key: <API_KEY>" https://<내도메인>/api/vehicles
+```
+
+키를 바꾸려면 `.env` 의 `API_KEY` 에 새 값을 넣고 `docker-compose up -d --force-recreate` 하세요.
+(자동 생성된 키를 새로 만들려면 `data/api-key.txt` 를 지우고 재시작하면 됩니다.)
+
 ## 보안 주의사항
 
-- 이 서버의 `/api/*`, `/admin/*` 경로에는 자체 인증이 없습니다. **외부 공개가 필요한 경로는
-  `/.well-known/...`과 `/auth/callback` 뿐**이므로, 가능하면 DSM 리버스 프록시에서
-  나머지 경로에 접근 제어(IP 제한 등)를 걸어 두는 것을 권장합니다.
-- `data/` 폴더(개인키, 토큰)는 절대 git에 커밋하거나 외부에 공유하지 마세요.
+- `data/` 폴더(개인키, 토큰, API 키)는 절대 git에 커밋하거나 외부에 공유하지 마세요.
+- API 키가 유출되면 차량 위치 조회와 깨우기가 가능해집니다. 유출이 의심되면 즉시 교체하세요.
 
 ## 문제 해결
 

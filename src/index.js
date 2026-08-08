@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import express from 'express';
 import { config, assertConfigured, redirectUri } from './config.js';
+import { ensureApiKey, getApiKey, requireApiKey } from './auth.js';
 import { ensureKeys, publicKeyPath } from './keys.js';
 import { loadTokens, clearTokens } from './tokenStore.js';
 import {
@@ -14,6 +15,10 @@ import {
 
 const app = express();
 app.use(express.json());
+
+// 공개키·콜백·헬스체크를 제외한 모든 경로에 API 키를 요구합니다.
+ensureApiKey();
+app.use(requireApiKey);
 
 // OAuth CSRF 방지용 state 저장 (10분 유효)
 const pendingStates = new Map();
@@ -72,6 +77,12 @@ pre{background:#f4f4f4;padding:10px;border-radius:6px;overflow-x:auto;white-spac
   <li><a href="/auth/login">Tesla 계정 로그인</a> — 사용자 토큰 발급</li>
   <li><a href="/api/vehicles">차량 목록 조회</a></li>
 </ol>
+<h2>터미널에서 호출하기</h2>
+<p>이 페이지는 API 키로 보호됩니다. 브라우저는 쿠키로 유지되지만,
+터미널에서는 헤더를 함께 보내야 합니다.</p>
+<pre>curl -H "X-API-Key: ${getApiKey()}" https://${domain}/api/vehicles</pre>
+<p>다른 기기의 브라우저에서 열 때는 아래 주소로 한 번 접속하세요.</p>
+<pre>https://${domain}/?key=${getApiKey()}</pre>
 <script>
 const out = document.getElementById('out');
 async function call(method, url, btn) {
@@ -188,4 +199,8 @@ app.listen(config.port, () => {
   if (missing.length) {
     console.warn(`⚠️ 환경변수 누락: ${missing.join(', ')}`);
   }
+  console.log('');
+  console.log('API 키가 필요합니다. 브라우저에서 아래 주소로 한 번 접속하세요:');
+  console.log(`  https://${config.domain || '<도메인>'}/?key=${getApiKey()}`);
+  console.log('');
 });
