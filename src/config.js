@@ -1,0 +1,39 @@
+// 환경변수 기반 설정
+const REGION_AUDIENCE = {
+  na: 'https://fleet-api.prd.na.vn.cloud.tesla.com', // 북미 + 아시아·태평양(한국 포함, 중국 제외)
+  eu: 'https://fleet-api.prd.eu.vn.cloud.tesla.com', // 유럽, 중동, 아프리카
+  cn: 'https://fleet-api.prd.cn.vn.cloud.tesla.cn',  // 중국
+};
+
+const region = (process.env.TESLA_REGION || 'na').toLowerCase();
+if (!REGION_AUDIENCE[region]) {
+  throw new Error(`TESLA_REGION 값이 잘못되었습니다: ${region} (na/eu/cn 중 하나여야 합니다)`);
+}
+
+export const config = {
+  port: Number(process.env.PORT || 8080),
+  clientId: process.env.TESLA_CLIENT_ID || '',
+  clientSecret: process.env.TESLA_CLIENT_SECRET || '',
+  // Tesla 개발자 포털에 등록한 도메인 (예: mynas.synology.me)
+  domain: process.env.TESLA_DOMAIN || '',
+  region,
+  audience: REGION_AUDIENCE[region],
+  authBase: 'https://auth.tesla.com/oauth2/v3',
+  tokenUrl: 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token',
+  scopes:
+    process.env.TESLA_SCOPES ||
+    'openid offline_access user_data vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds',
+  dataDir: process.env.DATA_DIR || '/data',
+};
+
+export function redirectUri() {
+  return `https://${config.domain}/auth/callback`;
+}
+
+export function assertConfigured() {
+  const missing = [];
+  if (!config.clientId) missing.push('TESLA_CLIENT_ID');
+  if (!config.clientSecret) missing.push('TESLA_CLIENT_SECRET');
+  if (!config.domain) missing.push('TESLA_DOMAIN');
+  return missing;
+}

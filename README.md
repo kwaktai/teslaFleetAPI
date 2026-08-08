@@ -1,1 +1,157 @@
-# teslaFleetAPI
+# Tesla Fleet API 서버 (시놀로지 Docker용)
+
+시놀로지 NAS의 Docker(Container Manager)에서 실행하는 자가 호스팅 Tesla Fleet API 서버입니다.
+
+- Tesla가 요구하는 공개키 호스팅 (`/.well-known/appspecific/com.tesla.3p.public-key.pem`)
+- 파트너(도메인) 등록 API
+- Tesla 계정 OAuth 로그인 + 토큰 자동 갱신
+- 차량 목록/상태 조회, 깨우기(wake_up) API
+
+## 사전 준비물
+
+| 항목 | 설명 |
+|---|---|
+| Tesla 개발자 계정 | https://developer.tesla.com 에서 앱 등록 (무료) |
+| 공개 HTTPS 도메인 | 시놀로지 DDNS(`xxx.synology.me`) 또는 개인 도메인. **반드시 443 포트로 외부에서 접속 가능해야 함** |
+| 시놀로지 DSM 7 이상 | Container Manager(구 Docker) 패키지 설치 |
+
+> 한국에서 사용하는 경우 리전은 `na` (북미·아시아태평양)입니다.
+
+## 1단계 — Tesla 개발자 앱 등록
+
+1. https://developer.tesla.com 접속 → Tesla 계정으로 로그인
+2. **Create App(앱 만들기)**:
+   - **Allowed Origin URL(허용 오리진)**: `https://<내도메인>` (예: `https://mynas.synology.me`)
+   - **Allowed Redirect URI(리디렉션 URI)**: `https://<내도메인>/auth/callback`
+   - **Scopes(권한)**: 필요한 항목 선택 — 차량 데이터(`vehicle_device_data`), 위치(`vehicle_location`), 명령(`vehicle_cmds`), 충전 명령(`vehicle_charging_cmds`), 오프라인 액세스(`offline_access`) 등
+3. 발급된 **Client ID / Client Secret**을 메모합니다.
+
+## 2단계 — 시놀로지에 파일 올리기
+
+1. File Station에서 `/volume1/docker/tesla-fleet-api` 폴더 생성 후 이 저장소 파일 전체 업로드
+   (또는 SSH에서 `git clone`)
+2. SSH 접속 후 키 생성:
+
+```sh
+cd /volume1/docker/tesla-fleet-api
+sh scripts/generate-keys.sh          # ./data/keys 에 키쌍 생성
+```
+
+- `data/keys/private-key.pem` — **개인키. 절대 유출 금지** (차량 명령 서명에 사용)
+- `data/keys/com.tesla.3p.public-key.pem` — 서버가 자동으로 호스팅하는 공개키
+
+3. `.env` 파일 생성:
+
+```sh
+cp .env.example .env
+vi .env    # CLIENT_ID / CLIENT_SECRET / 도메인 입력
+```
+
+## 3단계 — 컨테이너 실행
+
+SSH에서:
+
+```sh
+cd /volume1/docker/tesla-fleet-api
+sudo docker compose up -d --build
+```
+
+또는 Container Manager GUI → **프로젝트 → 생성** → 경로에 위 폴더 지정 → `docker-compose.yml` 자동 인식.
+
+확인: 브라우저에서 `http://<NAS내부IP>:8080` 접속 → 상태 페이지가 보이면 성공.
+
+## 4단계 — DSM 리버스 프록시로 HTTPS 연결
+
+Tesla는 **`https://<도메인>` (443 포트)** 에서 공개키를 검증하므로 리버스 프록시가 필요합니다.
+
+1. **제어판 → 로그인 포털 → 고급 → 역방향 프록시(Reverse Proxy) → 생성**
+   - 원본(Source): HTTPS / 호스트 이름 `<내도메인>` / 포트 `443`
+   - 대상(Destination): HTTP / `localhost` / 포트 `8080`
+2. **제어판 → 보안 → 인증서**: Let's Encrypt 인증서를 발급받아 해당 도메인에 연결
+3. 공유기에서 **443 포트 포워딩**을 NAS로 설정
+4. 외부(휴대폰 LTE 등)에서 확인:
+
+```
+https://<내도메인>/.well-known/appspecific/com.tesla.3p.public-key.pem
+```
+
+PEM 텍스트(`-----BEGIN PUBLIC KEY-----`)가 보여야 합니다.
+
+> DSM 웹 포털이 이미 443을 쓰고 있다면, 역방향 프록시 규칙이 우선 적용되므로 그대로 두면 됩니다. DSM 관리 포트(5001)와는 충돌하지 않습니다.
+
+## 5단계 — 파트너(도메인) 등록 (최초 1회)
+
+공개키가 외부에서 열리는 상태에서:
+
+```sh
+curl -X POST https://<내도메인>/admin/register-partner
+```
+
+응답에 등록된 도메인 정보가 나오면 성공입니다. 확인:
+
+```sh
+curl https://<내도메인>/admin/public-key-status
+```
+
+## 6단계 — Tesla 계정 로그인 (토큰 발급)
+
+브라우저에서 `https://<내도메인>/auth/login` 접속 → Tesla 계정 로그인 → 권한 동의.
+완료되면 토큰이 `data/tokens.json`에 저장되고 이후 자동 갱신됩니다.
+
+## 사용 예시
+
+```sh
+# 차량 목록
+curl https://<내도메인>/api/vehicles
+
+# 차량 깨우기 (id는 위 목록의 "id" 값)
+curl -X POST https://<내도메인>/api/vehicles/<id>/wake_up
+
+# 차량 상태 (깨어 있어야 응답)
+curl https://<내도메인>/api/vehicles/<id>/vehicle_data
+```
+
+## API 목록
+
+| 메서드 | 경로 | 설명 |
+|---|---|---|
+| GET | `/` | 상태 페이지 |
+| GET | `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Tesla 검증용 공개키 |
+| GET | `/auth/login` | Tesla OAuth 로그인 시작 |
+| GET | `/auth/callback` | OAuth 콜백 (Tesla가 호출) |
+| POST | `/auth/logout` | 저장된 토큰 삭제 |
+| POST | `/admin/register-partner` | 도메인 파트너 등록 |
+| GET | `/admin/public-key-status` | Tesla에 등록된 공개키 확인 |
+| GET | `/api/vehicles` | 차량 목록 |
+| GET | `/api/vehicles/:id/vehicle_data` | 차량 상세 상태 |
+| POST | `/api/vehicles/:id/wake_up` | 차량 깨우기 |
+| GET | `/healthz` | 헬스체크 |
+
+## 차량 명령(잠금/공조 등)에 대한 참고
+
+2021년 이후 차량(Model 3/Y 대부분, S/X 2021+)에 **명령을 보내려면** 개인키로 서명하는
+[Tesla Vehicle Command Proxy](https://github.com/teslamotors/vehicle-command)가 추가로 필요하며,
+차량 화면에서 가상 키(공개키)를 차량에 등록하는 절차가 있습니다:
+
+```
+https://tesla.com/_ak/<내도메인>   ← 이 링크를 Tesla 앱이 설치된 휴대폰에서 열기
+```
+
+단순 **조회(상태/위치/충전 정보)** 는 이 서버만으로 충분합니다. 명령 기능이 필요하면
+`vehicle-command` 프록시를 같은 `data/keys` 개인키로 연동해 확장할 수 있습니다.
+
+## 보안 주의사항
+
+- 이 서버의 `/api/*`, `/admin/*` 경로에는 자체 인증이 없습니다. **외부 공개가 필요한 경로는
+  `/.well-known/...`과 `/auth/callback` 뿐**이므로, 가능하면 DSM 리버스 프록시에서
+  나머지 경로에 접근 제어(IP 제한 등)를 걸어 두는 것을 권장합니다.
+- `data/` 폴더(개인키, 토큰)는 절대 git에 커밋하거나 외부에 공유하지 마세요.
+
+## 문제 해결
+
+| 증상 | 원인/해결 |
+|---|---|
+| 파트너 등록 시 412/424 오류 | 공개키 URL이 외부에서 안 열림 → 4단계(포트포워딩·인증서) 재확인 |
+| `login_required` 오류 | 토큰 만료/폐기 → `/auth/login` 재로그인 |
+| `vehicle unavailable` | 차량이 슬립 상태 → `wake_up` 후 수 초 뒤 재시도 |
+| 콜백에서 redirect_uri 오류 | 개발자 포털의 Redirect URI가 `https://<도메인>/auth/callback`과 정확히 일치하는지 확인 |
