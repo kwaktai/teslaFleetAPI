@@ -75,6 +75,10 @@ export function requireApiKey(req, res, next) {
 
   const query = req.query.key;
   if (query && safeEqual(query, apiKey)) {
+    // POST 등은 그대로 처리합니다. 리다이렉트를 걸면 iOS 단축어처럼
+    // 리다이렉트를 GET으로 따라가는 클라이언트에서 요청이 깨집니다.
+    if (req.method !== 'GET') return next();
+
     // 브라우저는 한 번만 ?key=... 로 들어오면 이후에는 쿠키로 유지됩니다.
     // 리버스 프록시 뒤에서는 X-Forwarded-Proto 로 원래 프로토콜을 판단합니다.
     res.cookie(COOKIE, apiKey, {
