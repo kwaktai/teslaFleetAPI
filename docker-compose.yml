@@ -21,3 +21,16 @@ services:
     volumes:
       # 키/토큰 영구 저장 (시놀로지 경로 예: /volume1/docker/tesla-fleet-api/data)
       - ./data:/data
+    depends_on:
+      - tesla-http-proxy
+
+  # 차량 명령에 개인키로 서명하는 Tesla 공식 프록시.
+  # 호스트 포트를 열지 않으므로 도커 내부 네트워크에서만 접근할 수 있습니다.
+  tesla-http-proxy:
+    build: ./proxy
+    container_name: tesla-http-proxy
+    restart: unless-stopped
+    expose:
+      - "4443"
+    volumes:
+      - ./data:/data
