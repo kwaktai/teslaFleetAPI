@@ -25,12 +25,14 @@ services:
       - tesla-http-proxy
 
   # 차량 명령에 개인키로 서명하는 Tesla 공식 프록시.
-  # 호스트 포트를 열지 않으므로 도커 내부 네트워크에서만 접근할 수 있습니다.
+  # tesla-fleet-api 는 도커 내부 네트워크로 접근하므로 아래 호스트 포트는 없어도 동작합니다.
+  # 이 포트에는 역방향 프록시나 포트포워딩을 걸지 마세요.
+  # 프록시에는 API 키 인증이 없고 Tesla 액세스 토큰만으로 명령을 받습니다.
   tesla-http-proxy:
     build: ./proxy
     container_name: tesla-http-proxy
     restart: unless-stopped
-    expose:
-      - "4443"
+    ports:
+      - "${PROXY_HOST_PORT:-9102}:4443"
     volumes:
       - ./data:/data

@@ -156,8 +156,14 @@ curl https://<내도메인>/api/vehicles/<id>/vehicle_data
 `docker-compose.yml` 에 포함된 `tesla-http-proxy`
 ([Tesla 공식 vehicle-command](https://github.com/teslamotors/vehicle-command))가 이 서명을 담당합니다.
 
-프록시는 **호스트 포트를 열지 않고** 도커 내부 네트워크에만 노출되며,
-`data/keys/private-key.pem` 을 그대로 사용합니다. 별도 설정은 없습니다.
+프록시는 `data/keys/private-key.pem` 을 그대로 사용하므로 키 설정은 필요 없습니다.
+
+서버는 도커 내부 네트워크(`https://tesla-http-proxy:4443`)로 프록시에 접근합니다.
+`.env` 의 `PROXY_HOST_PORT`(기본 9102)로 호스트에도 포트를 열 수 있는데, 이는 직접 확인·디버깅용입니다.
+
+> **이 포트에는 역방향 프록시나 공유기 포트포워딩을 연결하지 마세요.**
+> 프록시에는 이 서버의 API 키 인증이 적용되지 않고 Tesla 액세스 토큰만으로 명령을 받습니다.
+> 외부에 노출할 이유가 없으며, 필요 없다면 `docker-compose.yml` 에서 `ports` 를 지워도 정상 동작합니다.
 
 ### 가상 키 등록 (차량마다 한 번)
 
