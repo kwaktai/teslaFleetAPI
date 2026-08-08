@@ -178,3 +178,4 @@ https://tesla.com/_ak/<내도메인>   ← 이 링크를 Tesla 앱이 설치된 
 | 도메인을 바꿨더니 인증 실패 | 개발자 포털의 출처 URL·리디렉션 URI, `.env` 의 `TESLA_DOMAIN`, 인증서, 역방향 프록시 4곳을 모두 새 도메인으로 맞춰야 합니다 |
 | 502 Bad Gateway | 역방향 프록시의 대상 포트와 `.env` 의 `HOST_PORT` 불일치 → 두 값을 동일하게 |
 | `unknown shorthand flag: 'd'` | 구버전 Docker 패키지 → `docker compose` 대신 `docker-compose` 사용 |
+| `Bind mount failed: ... /data does not exist` | 프로젝트 폴더에서 `mkdir -p data` 실행 후 다시 기동 |

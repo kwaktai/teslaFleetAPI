@@ -1,5 +1,9 @@
 node_modules/
 .env
-data/
 *.pem
-!keys/.gitkeep
+
+# data/ 폴더 자체는 저장소에 남겨 둡니다.
+# 구버전 Docker 데몬은 바인드 마운트 대상 폴더를 자동 생성하지 않아,
+# 폴더가 없으면 컨테이너가 기동하지 못합니다.
+data/*
+!data/.gitkeep
