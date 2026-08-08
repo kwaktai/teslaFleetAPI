@@ -24,6 +24,8 @@ export const config = {
     process.env.TESLA_SCOPES ||
     'openid offline_access user_data vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds',
   dataDir: process.env.DATA_DIR || '/data',
+  // 비워두면 첫 실행 시 자동 생성되어 data/api-key.txt 에 보관됩니다.
+  apiKey: (process.env.API_KEY || '').trim(),
 };
 
 export function redirectUri() {
