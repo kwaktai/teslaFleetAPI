@@ -34,7 +34,9 @@ app.get('/.well-known/appspecific/com.tesla.3p.public-key.pem', (_req, res) => {
   if (!fs.existsSync(publicKeyPath)) {
     return res.status(500).send('공개키를 찾을 수 없습니다. 컨테이너 로그를 확인하세요.');
   }
-  res.type('application/x-pem-file').send(fs.readFileSync(publicKeyPath, 'utf8'));
+  // text/plain 으로 내려야 iOS Safari가 구성 프로파일 설치로 오인하지 않고
+  // 브라우저에서 바로 내용을 확인할 수 있습니다. Tesla는 본문만 읽습니다.
+  res.type('text/plain; charset=utf-8').send(fs.readFileSync(publicKeyPath, 'utf8'));
 });
 
 // ---------- 상태 페이지 ----------
