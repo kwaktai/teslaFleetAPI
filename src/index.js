@@ -47,7 +47,10 @@ app.get('/', (_req, res) => {
 <meta charset="utf-8">
 <title>Tesla Fleet API 서버</title>
 <style>body{font-family:sans-serif;max-width:720px;margin:40px auto;padding:0 16px;line-height:1.6}
-code{background:#eee;padding:2px 6px;border-radius:4px}li{margin:6px 0}</style>
+code{background:#eee;padding:2px 6px;border-radius:4px}li{margin:6px 0}
+button{font-size:15px;padding:8px 16px;border-radius:6px;border:1px solid #888;
+background:#3457d5;color:#fff;cursor:pointer}button:disabled{opacity:.6;cursor:default}
+pre{background:#f4f4f4;padding:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap}</style>
 <h1>Tesla Fleet API 서버</h1>
 <ul>
   <li>환경변수: ${missing.length ? `❌ 누락 — ${missing.join(', ')}` : '✅ 설정됨'}</li>
@@ -60,11 +63,35 @@ code{background:#eee;padding:2px 6px;border-radius:4px}li{margin:6px 0}</style>
   <li>외부에서 공개키가 열리는지 확인:
       <code>https://${domain}/.well-known/appspecific/com.tesla.3p.public-key.pem</code>
       (<a href="/.well-known/appspecific/com.tesla.3p.public-key.pem">내부에서 열기</a>)</li>
-  <li>도메인을 Tesla에 등록 (최초 1회):
-      <code>curl -X POST https://${domain}/admin/register-partner</code></li>
+  <li>도메인을 Tesla에 등록 (최초 1회):<br>
+      <button id="reg">도메인 등록하기</button>
+      <button id="chk">등록 상태 확인</button>
+      <pre id="out" hidden></pre></li>
   <li><a href="/auth/login">Tesla 계정 로그인</a> — 사용자 토큰 발급</li>
   <li><a href="/api/vehicles">차량 목록 조회</a></li>
-</ol>`);
+</ol>
+<script>
+const out = document.getElementById('out');
+async function call(method, url, btn) {
+  const buttons = document.querySelectorAll('button');
+  buttons.forEach(b => b.disabled = true);
+  out.hidden = false;
+  out.textContent = '요청 중...';
+  try {
+    const res = await fetch(url, { method });
+    const text = await res.text();
+    let body = text;
+    try { body = JSON.stringify(JSON.parse(text), null, 2); } catch {}
+    out.textContent = 'HTTP ' + res.status + '\\n\\n' + body;
+  } catch (e) {
+    out.textContent = '요청 실패: ' + e.message;
+  } finally {
+    buttons.forEach(b => b.disabled = false);
+  }
+}
+document.getElementById('reg').onclick = () => call('POST', '/admin/register-partner');
+document.getElementById('chk').onclick = () => call('GET', '/admin/public-key-status');
+</script>`);
 });
 
 // ---------- OAuth ----------
