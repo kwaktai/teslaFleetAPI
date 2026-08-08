@@ -1,3 +1,7 @@
+# version 키는 Compose v2에서는 무시되지만, 구버전 Docker 패키지(DSM 7.0~7.1)의
+# docker-compose v1 에서는 이 키가 없으면 파일을 해석하지 못합니다.
+version: "3.8"
+
 services:
   tesla-fleet-api:
     build: .

@@ -62,6 +62,13 @@ cd /volume1/docker/tesla-fleet-api
 sudo docker compose up -d --build
 ```
 
+`unknown shorthand flag: 'd'` 오류가 나면 구버전 Docker 패키지(DSM 7.0~7.1)이므로
+하이픈이 들어간 명령을 쓰세요. 동작은 동일합니다.
+
+```sh
+sudo docker-compose up -d --build
+```
+
 또는 Container Manager GUI → **프로젝트 → 생성** → 경로에 위 폴더 지정 → `docker-compose.yml` 자동 인식.
 
 확인: 브라우저에서 `http://<NAS내부IP>:8080` 접속 → 상태 페이지가 보이면 성공.
@@ -170,3 +177,4 @@ https://tesla.com/_ak/<내도메인>   ← 이 링크를 Tesla 앱이 설치된 
 | 콜백에서 redirect_uri 오류 | 개발자 포털의 Redirect URI가 `https://<도메인>/auth/callback`과 정확히 일치하는지 확인 |
 | 도메인을 바꿨더니 인증 실패 | 개발자 포털의 출처 URL·리디렉션 URI, `.env` 의 `TESLA_DOMAIN`, 인증서, 역방향 프록시 4곳을 모두 새 도메인으로 맞춰야 합니다 |
 | 502 Bad Gateway | 역방향 프록시의 대상 포트와 `.env` 의 `HOST_PORT` 불일치 → 두 값을 동일하게 |
+| `unknown shorthand flag: 'd'` | 구버전 Docker 패키지 → `docker compose` 대신 `docker-compose` 사용 |
