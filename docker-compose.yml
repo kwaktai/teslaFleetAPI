@@ -4,8 +4,9 @@ services:
     container_name: tesla-fleet-api
     restart: unless-stopped
     ports:
-      # 시놀로지 호스트 포트:컨테이너 포트 — DSM 리버스 프록시가 8080으로 전달
-      - "8080:8080"
+      # 호스트 포트:컨테이너 포트 — DSM 역방향 프록시가 이 호스트 포트로 전달합니다.
+      # 호스트 포트는 .env 의 HOST_PORT 로 바꿀 수 있습니다 (기본 8080).
+      - "${HOST_PORT:-8080}:8080"
     environment:
       TESLA_CLIENT_ID: ${TESLA_CLIENT_ID}
       TESLA_CLIENT_SECRET: ${TESLA_CLIENT_SECRET}

@@ -66,14 +66,20 @@ sudo docker compose up -d --build
 
 확인: 브라우저에서 `http://<NAS내부IP>:8080` 접속 → 상태 페이지가 보이면 성공.
 
+> 8080 포트가 다른 서비스와 겹치면 `.env` 에 `HOST_PORT=9101` 처럼 원하는 포트를 지정하세요.
+> 이 값은 아래 역방향 프록시의 **대상 포트**와 반드시 같아야 합니다.
+
 ## 4단계 — DSM 리버스 프록시로 HTTPS 연결
 
 Tesla는 **`https://<도메인>` (443 포트)** 에서 공개키를 검증하므로 리버스 프록시가 필요합니다.
 
 1. **제어판 → 로그인 포털 → 고급 → 역방향 프록시(Reverse Proxy) → 생성**
    - 원본(Source): HTTPS / 호스트 이름 `<내도메인>` / 포트 `443`
-   - 대상(Destination): HTTP / `localhost` / 포트 `8080`
+   - 대상(Destination): HTTP / `localhost` / 포트 `8080` (`.env` 의 `HOST_PORT` 와 동일하게)
 2. **제어판 → 보안 → 인증서**: Let's Encrypt 인증서를 발급받아 해당 도메인에 연결
+   - 서브도메인(`t.example.synology.me` 등)을 쓴다면 **인증서에 그 이름이 포함**되어야 합니다.
+     인증서 발급 시 "주체 대체 이름"에 서브도메인을 추가하거나 별도 인증서를 발급하세요.
+   - 발급 후 **인증서 설정**에서 해당 도메인에 인증서가 매핑되었는지 확인하세요.
 3. 공유기에서 **443 포트 포워딩**을 NAS로 설정
 4. 외부(휴대폰 LTE 등)에서 확인:
 
@@ -162,3 +168,5 @@ https://tesla.com/_ak/<내도메인>   ← 이 링크를 Tesla 앱이 설치된 
 | `login_required` 오류 | 토큰 만료/폐기 → `/auth/login` 재로그인 |
 | `vehicle unavailable` | 차량이 슬립 상태 → `wake_up` 후 수 초 뒤 재시도 |
 | 콜백에서 redirect_uri 오류 | 개발자 포털의 Redirect URI가 `https://<도메인>/auth/callback`과 정확히 일치하는지 확인 |
+| 도메인을 바꿨더니 인증 실패 | 개발자 포털의 출처 URL·리디렉션 URI, `.env` 의 `TESLA_DOMAIN`, 인증서, 역방향 프록시 4곳을 모두 새 도메인으로 맞춰야 합니다 |
+| 502 Bad Gateway | 역방향 프록시의 대상 포트와 `.env` 의 `HOST_PORT` 불일치 → 두 값을 동일하게 |
