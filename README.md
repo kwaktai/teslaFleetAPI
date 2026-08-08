@@ -30,21 +30,27 @@
 
 1. File Station에서 `/volume1/docker/tesla-fleet-api` 폴더 생성 후 이 저장소 파일 전체 업로드
    (또는 SSH에서 `git clone`)
-2. SSH 접속 후 키 생성:
+2. `.env` 파일 생성:
 
 ```sh
 cd /volume1/docker/tesla-fleet-api
-sh scripts/generate-keys.sh          # ./data/keys 에 키쌍 생성
-```
-
-- `data/keys/private-key.pem` — **개인키. 절대 유출 금지** (차량 명령 서명에 사용)
-- `data/keys/com.tesla.3p.public-key.pem` — 서버가 자동으로 호스팅하는 공개키
-
-3. `.env` 파일 생성:
-
-```sh
 cp .env.example .env
 vi .env    # CLIENT_ID / CLIENT_SECRET / 도메인 입력
+```
+
+### 키쌍에 대하여
+
+**키는 컨테이너가 처음 실행될 때 자동으로 생성**되므로 별도 작업이 필요 없습니다.
+`data/keys/` 폴더에 아래 두 파일이 만들어집니다.
+
+- `private-key.pem` — **개인키. 절대 유출 금지** (차량 명령 서명에 사용, 권한 600)
+- `com.tesla.3p.public-key.pem` — 서버가 `/.well-known/...` 경로로 호스팅하는 공개키
+
+`openssl`로 직접 만들고 싶다면 컨테이너 실행 전에 아래를 돌려도 됩니다(선택 사항).
+이미 키가 있으면 서버는 기존 키를 그대로 사용합니다.
+
+```sh
+sh scripts/generate-keys.sh          # ./data/keys 에 키쌍 생성
 ```
 
 ## 3단계 — 컨테이너 실행
@@ -152,6 +158,7 @@ https://tesla.com/_ak/<내도메인>   ← 이 링크를 Tesla 앱이 설치된 
 | 증상 | 원인/해결 |
 |---|---|
 | 파트너 등록 시 412/424 오류 | 공개키 URL이 외부에서 안 열림 → 4단계(포트포워딩·인증서) 재확인 |
+| 공개키 URL이 404 | 리버스 프록시가 `/.well-known/` 경로를 가로채는 경우 → DSM 규칙 확인 |
 | `login_required` 오류 | 토큰 만료/폐기 → `/auth/login` 재로그인 |
 | `vehicle unavailable` | 차량이 슬립 상태 → `wake_up` 후 수 초 뒤 재시도 |
 | 콜백에서 redirect_uri 오류 | 개발자 포털의 Redirect URI가 `https://<도메인>/auth/callback`과 정확히 일치하는지 확인 |
