@@ -1,0 +1,17 @@
+services:
+  tesla-fleet-api:
+    build: .
+    container_name: tesla-fleet-api
+    restart: unless-stopped
+    ports:
+      # 시놀로지 호스트 포트:컨테이너 포트 — DSM 리버스 프록시가 8080으로 전달
+      - "8080:8080"
+    environment:
+      TESLA_CLIENT_ID: ${TESLA_CLIENT_ID}
+      TESLA_CLIENT_SECRET: ${TESLA_CLIENT_SECRET}
+      TESLA_DOMAIN: ${TESLA_DOMAIN}
+      TESLA_REGION: ${TESLA_REGION:-na}
+      # TESLA_SCOPES: "openid offline_access vehicle_device_data ..."
+    volumes:
+      # 키/토큰 영구 저장 (시놀로지 경로 예: /volume1/docker/tesla-fleet-api/data)
+      - ./data:/data
