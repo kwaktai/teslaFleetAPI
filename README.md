@@ -145,7 +145,7 @@ curl https://<내도메인>/api/vehicles/<id>/vehicle_data
 | GET | `/api/vehicles` | 차량 목록 |
 | GET | `/api/vehicles/:id/vehicle_data` | 차량 상세 상태 |
 | POST | `/api/vehicles/:id/wake_up` | 차량 깨우기 |
-| POST | `/api/vehicles/:id/command/:command` | 차량 명령 (서명 프록시 경유, ID·VIN 모두 가능) |
+| POST | `/api/vehicles/:id/command/:command` | 차량 명령 (서명 프록시 경유) |
 | GET | `/healthz` | 헬스체크 |
 
 `/.well-known/...`, `/auth/callback`, `/healthz` 를 제외한 모든 경로는 API 키가 필요합니다.
@@ -175,20 +175,47 @@ https://tesla.com/_ak/<내도메인>
 
 이 절차를 건너뛰면 명령이 권한 오류로 실패합니다. 조회 기능에는 영향이 없습니다.
 
+### 차량 지정 방법
+
+차량은 아래 넷 중 아무거나로 지정할 수 있습니다. 서버가 내부적으로 VIN 으로 변환합니다.
+
+| 방식 | 예 |
+|---|---|
+| **별칭** (`.env` 에서 정의) | `3`, `X` |
+| 차량 이름 (Tesla 앱에서 정한 이름) | `Kana`, `Xp` |
+| 차량 ID | `1492931239318942` |
+| VIN | `5YJ3E1EB8LF727066` |
+
+별칭은 `.env` 에 `이름=VIN` 을 쉼표로 나열해 정의합니다.
+
+```
+VEHICLE_ALIASES=3=5YJ3E1EB8LF727066,X=7SAXCBE66TF488989
+```
+
+```sh
+curl -X POST -H "X-API-Key: <API_KEY>" \
+  https://<내도메인>/api/vehicles/3/command/door_lock
+```
+
+대소문자는 구분하지 않습니다. 현재 등록된 별칭은 상태 페이지에서 확인할 수 있습니다.
+
+> 차량 이름은 첫 조회 때 Tesla 목록에서 읽어 캐시합니다.
+> Tesla 앱에서 이름을 바꿨다면 컨테이너를 재시작해야 반영됩니다.
+
 ### 사용법 — 도우미 스크립트
 
 NAS에서는 `scripts/cmd.sh` 가 API 키와 포트를 `.env`(또는 `data/api-key.txt`)에서 읽어
 대신 호출해 줍니다. 키를 직접 입력할 일이 없습니다.
 
 ```sh
-./scripts/cmd.sh <차량ID 또는 VIN> <명령> [JSON 본문]
+./scripts/cmd.sh <차량(별칭/이름/ID/VIN)> <명령> [JSON 본문]
 ```
 
 ```sh
-./scripts/cmd.sh 5YJ3E1EB8LF727066 wake                        # 깨우기
-./scripts/cmd.sh 5YJ3E1EB8LF727066 door_unlock                 # 문 열기
-./scripts/cmd.sh 5YJ3E1EB8LF727066 door_lock                   # 문 잠그기
-./scripts/cmd.sh 5YJ3E1EB8LF727066 set_charge_limit '{"percent":80}'
+./scripts/cmd.sh 3 wake                        # 깨우기
+./scripts/cmd.sh 3 door_unlock                 # 문 열기
+./scripts/cmd.sh 3 door_lock                   # 문 잠그기
+./scripts/cmd.sh X set_charge_limit '{"percent":80}'
 ```
 
 `wake` 는 서명이 필요 없는 `wake_up` 엔드포인트로, 나머지는 서명 프록시로 전달됩니다.
@@ -198,15 +225,13 @@ NAS에서는 `scripts/cmd.sh` 가 API 키와 포트를 `.env`(또는 `data/api-k
 ```sh
 # 문 잠금
 curl -X POST -H "X-API-Key: <API_KEY>" \
-  https://<내도메인>/api/vehicles/<차량ID 또는 VIN>/command/door_lock
+  https://<내도메인>/api/vehicles/<차량>/command/door_lock
 
 # 충전 한도 80%
 curl -X POST -H "X-API-Key: <API_KEY>" -H "Content-Type: application/json" \
   -d '{"percent":80}' \
-  https://<내도메인>/api/vehicles/<차량ID 또는 VIN>/command/set_charge_limit
+  https://<내도메인>/api/vehicles/<차량>/command/set_charge_limit
 ```
-
-프록시 자체는 VIN만 받지만, 서버가 차량 ID를 VIN으로 자동 변환하므로 **둘 중 아무거나** 넣어도 됩니다.
 
 자주 쓰는 명령: `door_lock`, `door_unlock`, `auto_conditioning_start`, `auto_conditioning_stop`,
 `set_temps`, `charge_start`, `charge_stop`, `set_charge_limit`, `flash_lights`, `honk_horn`.

@@ -4,6 +4,7 @@ import express from 'express';
 import { config, assertConfigured, redirectUri } from './config.js';
 import { ensureApiKey, getApiKey, requireApiKey } from './auth.js';
 import { COMMON_COMMANDS, proxyReady, sendCommand } from './commands.js';
+import { aliasEntries, resolveVehicle } from './vehicles.js';
 import { ensureKeys, publicKeyPath } from './keys.js';
 import { loadTokens, clearTokens } from './tokenStore.js';
 import {
@@ -83,6 +84,12 @@ pre{background:#f4f4f4;padding:10px;border-radius:6px;overflow-x:auto;white-spac
 <p>명령을 보내려면 차량에 <strong>가상 키</strong>가 등록되어 있어야 합니다.
 Tesla 앱이 설치된 휴대폰에서 아래 링크를 열고 차량에서 승인하세요. 차량마다 한 번씩 필요합니다.</p>
 <pre>https://tesla.com/_ak/${domain}</pre>
+<p>차량은 <strong>별칭·차량 이름·차량 ID·VIN</strong> 중 아무거나로 지정할 수 있습니다.
+${
+  aliasEntries().length
+    ? `현재 별칭: ${aliasEntries().map(([n, v]) => `<code>${n}</code> → ${v}`).join(', ')}`
+    : '별칭을 쓰려면 <code>.env</code> 에 <code>VEHICLE_ALIASES=3=VIN1,X=VIN2</code> 형식으로 추가하세요.'
+}</p>
 <p>등록 후에는 아래처럼 호출합니다. 자주 쓰는 명령:
 ${COMMON_COMMANDS.map(([c, label]) => `<code>${c}</code>(${label})`).join(', ')}</p>
 <pre>curl -X POST -H "X-API-Key: ${getApiKey()}" \\
@@ -183,9 +190,8 @@ app.get('/api/vehicles', async (_req, res) => {
 
 app.get('/api/vehicles/:id/vehicle_data', async (req, res) => {
   try {
-    const result = await fleetFetch(
-      `/api/1/vehicles/${encodeURIComponent(req.params.id)}/vehicle_data`
-    );
+    const vin = await resolveVehicle(req.params.id);
+    const result = await fleetFetch(`/api/1/vehicles/${encodeURIComponent(vin)}/vehicle_data`);
     res.status(result.status).json(result.body);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -194,10 +200,10 @@ app.get('/api/vehicles/:id/vehicle_data', async (req, res) => {
 
 app.post('/api/vehicles/:id/wake_up', async (req, res) => {
   try {
-    const result = await fleetFetch(
-      `/api/1/vehicles/${encodeURIComponent(req.params.id)}/wake_up`,
-      { method: 'POST' }
-    );
+    const vin = await resolveVehicle(req.params.id);
+    const result = await fleetFetch(`/api/1/vehicles/${encodeURIComponent(vin)}/wake_up`, {
+      method: 'POST',
+    });
     res.status(result.status).json(result.body);
   } catch (e) {
     res.status(500).json({ error: e.message });
