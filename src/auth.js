@@ -92,17 +92,25 @@ export function requireApiKey(req, res, next) {
     return res.redirect(req.path);
   }
 
+  const host = config.domain || '<도메인>';
+  // 키의 출처에 따라 확인 방법이 다릅니다.
+  const whereIsKey = config.apiKey
+    ? 'API_KEY 확인: .env 파일의 API_KEY 값  (grep API_KEY .env)'
+    : 'API_KEY 확인: sudo docker exec tesla-fleet-api cat /data/api-key.txt';
+
   res.status(401).type('text/plain; charset=utf-8').send(
     [
       '401 인증 필요',
       '',
-      '브라우저: 아래 주소로 한 번 접속하면 이후에는 자동으로 유지됩니다.',
-      `  https://${config.domain || '<도메인>'}/?key=<API_KEY>`,
+      '이 화면은 키 없이 접속했을 때 정상적으로 나오는 안내입니다.',
+      '',
+      '브라우저: 아래 주소로 한 번 접속하면 이후에는 쿠키로 유지됩니다.',
+      `  https://${host}/?key=<API_KEY>`,
       '',
       '터미널: X-API-Key 헤더를 함께 보내세요.',
-      `  curl -H "X-API-Key: <API_KEY>" https://${config.domain || '<도메인>'}/api/vehicles`,
+      `  curl -H "X-API-Key: <API_KEY>" https://${host}/api/vehicles`,
       '',
-      'API_KEY 확인: sudo docker exec tesla-fleet-api cat /data/api-key.txt',
+      whereIsKey,
     ].join('\n')
   );
 }
