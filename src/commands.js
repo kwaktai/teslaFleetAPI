@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import https from 'node:https';
 import { config, proxyCaPath } from './config.js';
-import { fleetFetch, getAccessToken } from './tesla.js';
+import { getAccessToken } from './tesla.js';
+import { resolveVehicle } from './vehicles.js';
 
 // 자주 쓰는 명령 목록 (상태 페이지 안내용). 여기 없는 명령도 그대로 전달됩니다.
 export const COMMON_COMMANDS = [
@@ -21,32 +22,6 @@ export function proxyReady() {
   return fs.existsSync(proxyCaPath);
 }
 
-// 서명 프록시는 경로에 VIN을 요구하지만, 조회 API는 차량 ID를 씁니다.
-// 사용자가 어느 쪽을 넣어도 동작하도록 ID를 VIN으로 바꿔줍니다.
-const VIN_PATTERN = /^[A-HJ-NPR-Z0-9]{17}$/i;
-const vinById = new Map();
-
-// listVehicles 는 테스트에서 갈아끼울 수 있도록 인자로 받습니다.
-export async function resolveVin(vehicleTag, listVehicles = () => fleetFetch('/api/1/vehicles')) {
-  const tag = String(vehicleTag);
-  if (VIN_PATTERN.test(tag)) return tag.toUpperCase();
-  if (vinById.has(tag)) return vinById.get(tag);
-
-  const { status, body } = await listVehicles();
-  if (status !== 200 || !Array.isArray(body?.response)) {
-    throw new Error(`차량 목록을 가져오지 못했습니다 (HTTP ${status})`);
-  }
-  for (const vehicle of body.response) {
-    if (!vehicle?.vin) continue;
-    vinById.set(String(vehicle.id), vehicle.vin);
-    vinById.set(String(vehicle.id_s), vehicle.vin);
-  }
-
-  const vin = vinById.get(tag);
-  if (!vin) throw new Error(`차량을 찾을 수 없습니다: ${tag}`);
-  return vin;
-}
-
 // 명령을 서명 프록시로 전달합니다.
 // 프록시는 자체 서명 인증서를 쓰므로, 프록시가 생성한 인증서 파일로 검증합니다.
 // 인증서를 읽을 수 없으면 검증을 끄는 대신 요청을 거부합니다.
@@ -58,7 +33,7 @@ export async function sendCommand(vehicleTag, command, payload) {
     );
   }
 
-  const vin = await resolveVin(vehicleTag);
+  const vin = await resolveVehicle(vehicleTag);
   const token = await getAccessToken();
   const ca = fs.readFileSync(proxyCaPath);
   const url = new URL(config.proxyUrl);

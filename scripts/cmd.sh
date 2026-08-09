@@ -2,13 +2,14 @@
 # 차량 명령 도우미. API 키를 .env 또는 data/api-key.txt 에서 읽어오므로
 # 키를 직접 입력하거나 화면에 노출할 필요가 없습니다.
 #
-# 사용법: ./scripts/cmd.sh <차량ID 또는 VIN> <명령> [JSON 본문]
+# 사용법: ./scripts/cmd.sh <차량> <명령> [JSON 본문]
+#   <차량> 은 별칭(.env 의 VEHICLE_ALIASES), 차량 이름, 차량 ID, VIN 중 아무거나
 #
 # 예시:
-#   ./scripts/cmd.sh 5YJ3E1EB8LF727066 wake              # 깨우기
-#   ./scripts/cmd.sh 5YJ3E1EB8LF727066 door_unlock       # 문 열기
-#   ./scripts/cmd.sh 5YJ3E1EB8LF727066 door_lock         # 문 잠그기
-#   ./scripts/cmd.sh 5YJ3E1EB8LF727066 set_charge_limit '{"percent":80}'
+#   ./scripts/cmd.sh 3 wake                       # 깨우기
+#   ./scripts/cmd.sh 3 door_unlock                # 문 열기
+#   ./scripts/cmd.sh Kana door_lock               # 차량 이름으로도 가능
+#   ./scripts/cmd.sh X set_charge_limit '{"percent":80}'
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -20,8 +21,8 @@ read_env() {
 }
 
 if [ $# -lt 2 ]; then
-  echo "사용법: $0 <차량ID 또는 VIN> <명령> [JSON 본문]" >&2
-  echo "예:     $0 5YJ3E1EB8LF727066 door_unlock" >&2
+  echo "사용법: $0 <차량(별칭/이름/ID/VIN)> <명령> [JSON 본문]" >&2
+  echo "예:     $0 3 door_unlock" >&2
   exit 1
 fi
 

@@ -28,6 +28,8 @@ export const config = {
   apiKey: (process.env.API_KEY || '').trim(),
   // 명령 서명 프록시 (tesla-http-proxy). 도커 내부 네트워크에서만 접근합니다.
   proxyUrl: process.env.COMMAND_PROXY_URL || 'https://tesla-http-proxy:4443',
+  // 차량 별칭. 예: "3=5YJ...,X=7SA..."
+  vehicleAliases: process.env.VEHICLE_ALIASES || '',
 };
 
 // 프록시가 생성한 자체 서명 인증서. 이 파일로 프록시를 검증합니다.

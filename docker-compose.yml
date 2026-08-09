@@ -17,6 +17,7 @@ services:
       TESLA_DOMAIN: ${TESLA_DOMAIN}
       TESLA_REGION: ${TESLA_REGION:-na}
       API_KEY: ${API_KEY:-}
+      VEHICLE_ALIASES: ${VEHICLE_ALIASES:-}
       # TESLA_SCOPES: "openid offline_access vehicle_device_data ..."
     volumes:
       # 키/토큰 영구 저장 (시놀로지 경로 예: /volume1/docker/tesla-fleet-api/data)
