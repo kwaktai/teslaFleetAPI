@@ -137,6 +137,7 @@ curl https://<내도메인>/api/vehicles/<id>/vehicle_data
 |---|---|---|
 | GET | `/` | 상태 페이지 |
 | GET | `/control` | 차량 제어 페이지 (버튼) |
+| GET | `/document` | API 문서 (전체 명령 목록) |
 | GET | `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Tesla 검증용 공개키 |
 | GET | `/auth/login` | Tesla OAuth 로그인 시작 |
 | GET | `/auth/callback` | OAuth 콜백 (Tesla가 호출) |
@@ -247,9 +248,20 @@ curl -X POST -H "X-API-Key: <API_KEY>" -H "Content-Type: application/json" \
   https://<내도메인>/api/vehicles/<차량>/command/set_charge_limit
 ```
 
+### 전체 명령 목록
+
+서명 프록시가 지원하는 **69개 명령**과 각 명령의 파라미터를 문서 페이지에서 확인할 수 있습니다.
+검색창으로 걸러볼 수 있습니다.
+
+```
+https://<내도메인>/document
+```
+
+목록은 `vehicle-command v0.4.1` 소스에서 추출해 `src/catalog.js` 에 담겨 있습니다.
+분류는 도어·트렁크·창문(9), 공조·시트(12), 충전(15), 보안·접근 제한(12), 미디어(9), 기타·차량 관리(12) 입니다.
+
 자주 쓰는 명령: `door_lock`, `door_unlock`, `auto_conditioning_start`, `auto_conditioning_stop`,
 `set_temps`, `charge_start`, `charge_stop`, `set_charge_limit`, `flash_lights`, `honk_horn`.
-목록에 없는 명령도 그대로 전달되므로 Fleet API 문서의 다른 명령도 사용할 수 있습니다.
 
 ### 명령이 실패할 때
 

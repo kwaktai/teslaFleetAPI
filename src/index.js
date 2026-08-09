@@ -4,6 +4,7 @@ import express from 'express';
 import { config, assertConfigured, redirectUri } from './config.js';
 import { ensureApiKey, getApiKey, requireApiKey } from './auth.js';
 import { COMMON_COMMANDS, proxyReady, sendCommand } from './commands.js';
+import { renderDocument } from './document.js';
 import { aliasEntries, resolveVehicle } from './vehicles.js';
 import { ensureKeys, publicKeyPath } from './keys.js';
 import { loadTokens, clearTokens } from './tokenStore.js';
@@ -80,7 +81,7 @@ pre{background:#f4f4f4;padding:10px;border-radius:6px;overflow-x:auto;white-spac
   <li><a href="/auth/login">Tesla 계정 로그인</a> — 사용자 토큰 발급</li>
   <li><a href="/api/vehicles">차량 목록 조회</a></li>
 </ol>
-<p><a href="/control"><strong>차량 제어 페이지 열기 →</strong></a>
+<p><a href="/control"><strong>차량 제어 페이지 →</strong></a> &nbsp; <a href="/document"><strong>API 문서 →</strong></a><br>
 휴대폰에서 북마크해 두면 버튼으로 문 열기·공조를 바로 실행할 수 있습니다.</p>
 <h2>차량 명령</h2>
 <p>명령을 보내려면 차량에 <strong>가상 키</strong>가 등록되어 있어야 합니다.
@@ -210,6 +211,11 @@ app.post('/api/vehicles/:id/wake_up', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ---------- API 문서 ----------
+app.get('/document', (_req, res) => {
+  res.type('html').send(renderDocument());
 });
 
 // ---------- 제어 페이지 ----------
