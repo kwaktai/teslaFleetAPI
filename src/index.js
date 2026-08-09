@@ -262,7 +262,8 @@ async function run(vehicle, button) {
   if (button.confirm && !confirm(vehicle.name + ' — ' + button.label + ' 실행할까요?')) return;
   const url = button.command === 'wake_up'
     ? '/api/vehicles/' + encodeURIComponent(vehicle.vin) + '/wake_up'
-    : '/api/vehicles/' + encodeURIComponent(vehicle.vin) + '/command/' + button.command;
+    // 자고 있으면 서버가 깨운 뒤 재시도합니다. 깨어 있으면 지연 없이 바로 실행됩니다.
+    : '/api/vehicles/' + encodeURIComponent(vehicle.vin) + '/command/' + button.command + '?wake=1';
   document.querySelectorAll('button').forEach(b => b.disabled = true);
   out.textContent = vehicle.name + ' — ' + button.label + ' 요청 중...';
   try {
@@ -316,9 +317,12 @@ async function run(vehicle, button) {
 // 차량 명령 — 서명 프록시를 거쳐 전달합니다.
 // 예: POST /api/vehicles/<id>/command/door_lock
 //     POST /api/vehicles/<id>/command/set_charge_limit  {"percent": 80}
+// ?wake=1 을 붙이면 차량이 자고 있을 때만 깨운 뒤 자동으로 재시도합니다.
+// 이미 깨어 있으면 그대로 즉시 실행되므로 지연이 없습니다.
 app.post('/api/vehicles/:id/command/:command', async (req, res) => {
   try {
-    const result = await sendCommand(req.params.id, req.params.command, req.body);
+    const wake = ['1', 'true', 'yes'].includes(String(req.query.wake || '').toLowerCase());
+    const result = await sendCommand(req.params.id, req.params.command, req.body, { wake });
     res.status(result.status).json(result.body);
   } catch (e) {
     res.status(502).json({ error: e.message });

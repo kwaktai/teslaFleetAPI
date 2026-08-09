@@ -112,6 +112,8 @@ ${COMMAND_COUNT}개입니다.</p>
   <tr><td>GET</td><td><code>/api/vehicles/:차량/vehicle_data</code></td><td>차량 상세 상태</td></tr>
   <tr><td>POST</td><td><code>/api/vehicles/:차량/wake_up</code></td><td>차량 깨우기</td></tr>
   <tr><td>POST</td><td><code>/api/vehicles/:차량/command/:명령</code></td><td>차량 명령 (아래 목록)</td></tr>
+  <tr><td>POST</td><td><code>/api/vehicles/:차량/command/:명령<strong>?wake=1</strong></code></td>
+      <td>자고 있을 때만 깨운 뒤 자동 재시도</td></tr>
   <tr><td>GET</td><td><code>/auth/login</code></td><td>Tesla 계정 로그인</td></tr>
   <tr><td>POST</td><td><code>/admin/register-partner</code></td><td>도메인 파트너 등록</td></tr>
   <tr><td>GET</td><td><code>/admin/public-key-status</code></td><td>등록된 공개키 확인</td></tr>
@@ -122,7 +124,21 @@ ${COMMAND_COUNT}개입니다.</p>
 브라우저 주소창은 GET만 보내므로 <code>Cannot GET</code> 이 납니다.
 브라우저에서 실행하려면 <a href="/control">제어 페이지</a>를 쓰세요.</div>
 
-<h2>4. 호출 예시</h2>
+<h2>4. 잠든 차량 자동 처리</h2>
+<p>명령 URL 뒤에 <code>?wake=1</code> 을 붙이면, 차량이 자고 있어 명령이 거부된 경우에만
+서버가 깨우고 온라인이 되는 즉시 한 번 재시도합니다.</p>
+<table>
+  <tr><th>차량 상태</th><th>동작</th></tr>
+  <tr><td>깨어 있음</td><td>바로 실행. <strong>추가 호출도 대기도 없습니다.</strong></td></tr>
+  <tr><td>자고 있음</td><td>깨우기 → 온라인 확인(2초 간격) → 재시도</td></tr>
+  <tr><td>제한 시간 내 못 깨어남</td><td>원래 오류를 그대로 반환 (기본 30초, <code>WAKE_TIMEOUT_SECONDS</code>)</td></tr>
+</table>
+<pre>curl -X POST -H "X-API-Key: &lt;키&gt;" \\
+  "https://${esc(domain)}/api/vehicles/3/command/door_unlock?wake=1"</pre>
+<p class="muted">단축어에서 상태를 먼저 조회해 분기할 필요가 없습니다. 동작 하나면 충분합니다.
+<a href="/control">제어 페이지</a>의 버튼도 이 방식을 씁니다.</p>
+
+<h2>5. 호출 예시</h2>
 <pre>curl -X POST -H "X-API-Key: &lt;키&gt;" \\
   https://${esc(domain)}/api/vehicles/3/command/door_unlock</pre>
 <pre>curl -X POST -H "X-API-Key: &lt;키&gt;" -H "Content-Type: application/json" \\
@@ -134,12 +150,12 @@ ${COMMAND_COUNT}개입니다.</p>
 <p><strong>iOS 단축어</strong>: "URL 콘텐츠 가져오기" → 방식 <code>POST</code> →
 헤더에 <code>X-API-Key</code> 추가 → 값이 필요한 명령은 본문을 JSON 으로 지정.</p>
 
-<h2>5. 차량 명령 (${COMMAND_COUNT}개)</h2>
+<h2>6. 차량 명령 (${COMMAND_COUNT}개)</h2>
 <div class="warn"><strong>명령을 쓰려면 차량마다 가상 키 등록이 필요합니다.</strong><br>
 Tesla 앱이 설치된 휴대폰에서 <code>https://tesla.com/_ak/${esc(domain)}</code> 를 열고
 차량 옆에서 승인하세요. 등록 전에는 권한 오류가 납니다. 조회 기능에는 영향이 없습니다.</div>
 <p class="muted">파라미터는 요청 본문에 JSON 으로 보냅니다. "선택" 표시가 없는 것은 필수입니다.
-차량이 잠들어 있으면 먼저 <code>wake_up</code> 을 호출하세요.</p>
+차량이 잠들어 있을 수 있다면 <code>?wake=1</code> 을 붙이세요.</p>
 
 <table>
   <tr><th>표시</th><th>전달 경로</th><th>의미</th></tr>
