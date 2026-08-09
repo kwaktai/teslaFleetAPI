@@ -136,6 +136,7 @@ curl https://<내도메인>/api/vehicles/<id>/vehicle_data
 | 메서드 | 경로 | 설명 |
 |---|---|---|
 | GET | `/` | 상태 페이지 |
+| GET | `/control` | 차량 제어 페이지 (버튼) |
 | GET | `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Tesla 검증용 공개키 |
 | GET | `/auth/login` | Tesla OAuth 로그인 시작 |
 | GET | `/auth/callback` | OAuth 콜백 (Tesla가 호출) |
@@ -201,6 +202,19 @@ curl -X POST -H "X-API-Key: <API_KEY>" \
 
 > 차량 이름은 첫 조회 때 Tesla 목록에서 읽어 캐시합니다.
 > Tesla 앱에서 이름을 바꿨다면 컨테이너를 재시작해야 반영됩니다.
+
+### 사용법 — 제어 페이지 (휴대폰 권장)
+
+```
+https://<내도메인>/control
+```
+
+차량별로 깨우기·문 열기·문 잠금·공조·전조등·경적 버튼이 나옵니다.
+휴대폰 홈 화면에 추가해 두면 앱처럼 쓸 수 있습니다. 문 열기는 확인창을 한 번 거칩니다.
+
+> 명령은 `POST` 전용이라 **주소창에 명령 URL을 직접 입력하면 `Cannot GET` 이 납니다.**
+> 브라우저와 메신저가 링크를 미리 열어보는 경우가 있어, GET 으로 열어두면
+> 링크를 스치기만 해도 차 문이 열릴 수 있습니다. 그래서 버튼 방식으로 제공합니다.
 
 ### 사용법 — 도우미 스크립트
 
