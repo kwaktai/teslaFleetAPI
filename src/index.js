@@ -80,6 +80,8 @@ pre{background:#f4f4f4;padding:10px;border-radius:6px;overflow-x:auto;white-spac
   <li><a href="/auth/login">Tesla 계정 로그인</a> — 사용자 토큰 발급</li>
   <li><a href="/api/vehicles">차량 목록 조회</a></li>
 </ol>
+<p><a href="/control"><strong>차량 제어 페이지 열기 →</strong></a>
+휴대폰에서 북마크해 두면 버튼으로 문 열기·공조를 바로 실행할 수 있습니다.</p>
 <h2>차량 명령</h2>
 <p>명령을 보내려면 차량에 <strong>가상 키</strong>가 등록되어 있어야 합니다.
 Tesla 앱이 설치된 휴대폰에서 아래 링크를 열고 차량에서 승인하세요. 차량마다 한 번씩 필요합니다.</p>
@@ -208,6 +210,101 @@ app.post('/api/vehicles/:id/wake_up', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ---------- 제어 페이지 ----------
+// 명령은 POST 전용이라 주소창으로는 호출할 수 없습니다. (브라우저·메신저가 링크를
+// 미리 열어보는 경우가 있어, GET 으로 열어두면 실수로 차가 열릴 수 있습니다.)
+// 이 페이지를 북마크해 두고 버튼으로 실행하세요.
+const CONTROL_BUTTONS = [
+  { command: 'wake_up', label: '깨우기' },
+  { command: 'door_unlock', label: '문 열기', confirm: true },
+  { command: 'door_lock', label: '문 잠금' },
+  { command: 'auto_conditioning_start', label: '공조 켜기' },
+  { command: 'auto_conditioning_stop', label: '공조 끄기' },
+  { command: 'flash_lights', label: '전조등' },
+  { command: 'honk_horn', label: '경적' },
+];
+
+app.get('/control', (_req, res) => {
+  res.type('html').send(`<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>차량 제어</title>
+<style>
+body{font-family:-apple-system,sans-serif;max-width:560px;margin:0 auto;padding:16px;
+background:#111;color:#eee;line-height:1.5}
+h1{font-size:20px}h2{font-size:17px;margin:24px 0 8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}
+button{font-size:16px;padding:14px 8px;border-radius:10px;border:1px solid #444;
+background:#222;color:#eee}button:active{background:#333}
+button.warn{border-color:#a55;background:#2a1a1a}
+button:disabled{opacity:.5}
+pre{background:#1c1c1c;padding:12px;border-radius:10px;overflow-x:auto;
+white-space:pre-wrap;font-size:13px;min-height:1em}
+.state{font-size:13px;color:#999;font-weight:normal}
+</style>
+<h1>차량 제어</h1>
+<div id="cars">차량 목록을 불러오는 중...</div>
+<h2>결과</h2>
+<pre id="out">대기 중</pre>
+<script>
+const BUTTONS = ${JSON.stringify(CONTROL_BUTTONS)};
+const out = document.getElementById('out');
+
+async function run(vehicle, button) {
+  if (button.confirm && !confirm(vehicle.name + ' — ' + button.label + ' 실행할까요?')) return;
+  const url = button.command === 'wake_up'
+    ? '/api/vehicles/' + encodeURIComponent(vehicle.vin) + '/wake_up'
+    : '/api/vehicles/' + encodeURIComponent(vehicle.vin) + '/command/' + button.command;
+  document.querySelectorAll('button').forEach(b => b.disabled = true);
+  out.textContent = vehicle.name + ' — ' + button.label + ' 요청 중...';
+  try {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const text = await res.text();
+    let body = text;
+    try { body = JSON.stringify(JSON.parse(text), null, 2); } catch {}
+    out.textContent = vehicle.name + ' — ' + button.label + '\\nHTTP ' + res.status + '\\n\\n' + body;
+  } catch (e) {
+    out.textContent = '요청 실패: ' + e.message;
+  } finally {
+    document.querySelectorAll('button').forEach(b => b.disabled = false);
+  }
+}
+
+(async () => {
+  const box = document.getElementById('cars');
+  try {
+    const res = await fetch('/api/vehicles');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const list = (await res.json()).response || [];
+    if (!list.length) { box.textContent = '차량이 없습니다.'; return; }
+    box.textContent = '';
+    for (const v of list) {
+      const vehicle = { name: v.display_name || v.vin, vin: v.vin, state: v.state };
+      const title = document.createElement('h2');
+      title.textContent = vehicle.name + ' ';
+      const state = document.createElement('span');
+      state.className = 'state';
+      state.textContent = '(' + (vehicle.state || '?') + ')';
+      title.appendChild(state);
+      box.appendChild(title);
+      const grid = document.createElement('div');
+      grid.className = 'grid';
+      for (const b of BUTTONS) {
+        const el = document.createElement('button');
+        el.textContent = b.label;
+        if (b.confirm) el.className = 'warn';
+        el.onclick = () => run(vehicle, b);
+        grid.appendChild(el);
+      }
+      box.appendChild(grid);
+    }
+  } catch (e) {
+    box.textContent = '차량 목록을 불러오지 못했습니다: ' + e.message;
+  }
+})();
+</script>`);
 });
 
 // 차량 명령 — 서명 프록시를 거쳐 전달합니다.
