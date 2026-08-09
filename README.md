@@ -148,6 +148,7 @@ curl https://<내도메인>/api/vehicles/<id>/vehicle_data
 | GET | `/api/vehicles/:id/vehicle_data` | 차량 상세 상태 |
 | POST | `/api/vehicles/:id/wake_up` | 차량 깨우기 |
 | POST | `/api/vehicles/:id/command/:command` | 차량 명령 (서명 프록시 경유) |
+| POST | `/api/vehicles/:id/command/:command?wake=1` | 자고 있을 때만 깨운 뒤 자동 재시도 |
 | GET | `/healthz` | 헬스체크 |
 
 `/.well-known/...`, `/auth/callback`, `/healthz` 를 제외한 모든 경로는 API 키가 필요합니다.
@@ -203,6 +204,25 @@ curl -X POST -H "X-API-Key: <API_KEY>" \
 
 > 차량 이름은 첫 조회 때 Tesla 목록에서 읽어 캐시합니다.
 > Tesla 앱에서 이름을 바꿨다면 컨테이너를 재시작해야 반영됩니다.
+
+### 잠든 차량 자동 처리 (`?wake=1`)
+
+명령 URL 뒤에 `?wake=1` 을 붙이면, **차량이 자고 있어 명령이 거부된 경우에만** 서버가 깨우고
+온라인이 되는 즉시 재시도합니다.
+
+| 차량 상태 | 동작 |
+|---|---|
+| 깨어 있음 | 바로 실행 — 추가 호출도 대기도 없음 |
+| 자고 있음 | 깨우기 → 2초 간격으로 온라인 확인 → 재시도 |
+| 제한 시간 초과 | 원래 오류를 그대로 반환 (기본 30초, `.env` 의 `WAKE_TIMEOUT_SECONDS`) |
+
+```sh
+curl -X POST -H "X-API-Key: <API_KEY>" \
+  "https://<내도메인>/api/vehicles/3/command/door_unlock?wake=1"
+```
+
+덕분에 iOS 단축어에서 상태를 먼저 조회해 분기할 필요가 없습니다. 동작 하나면 충분합니다.
+제어 페이지의 버튼도 이 방식을 씁니다.
 
 ### 사용법 — 제어 페이지 (휴대폰 권장)
 
