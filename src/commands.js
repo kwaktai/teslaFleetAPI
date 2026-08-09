@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import https from 'node:https';
 import { config, proxyCaPath } from './config.js';
-import { getAccessToken } from './tesla.js';
+import { REST_COMMANDS } from './catalog.js';
+import { fleetFetch, getAccessToken } from './tesla.js';
 import { resolveVehicle } from './vehicles.js';
 
 // 자주 쓰는 명령 목록 (상태 페이지 안내용). 여기 없는 명령도 그대로 전달됩니다.
@@ -26,6 +27,18 @@ export function proxyReady() {
 // 프록시는 자체 서명 인증서를 쓰므로, 프록시가 생성한 인증서 파일로 검증합니다.
 // 인증서를 읽을 수 없으면 검증을 끄는 대신 요청을 거부합니다.
 export async function sendCommand(vehicleTag, command, payload) {
+  const vin = await resolveVehicle(vehicleTag);
+  const body = payload && Object.keys(payload).length ? payload : {};
+
+  // 프록시가 구현하지 않은 명령은 서명 없이 Fleet API 로 바로 보냅니다.
+  // 차량이 서명을 요구하면 Tesla 가 거부하므로 응답을 그대로 전달합니다.
+  if (REST_COMMANDS.has(command)) {
+    return fleetFetch(
+      `/api/1/vehicles/${encodeURIComponent(vin)}/command/${encodeURIComponent(command)}`,
+      { method: 'POST', body }
+    );
+  }
+
   if (!proxyReady()) {
     throw new Error(
       `프록시 인증서를 찾을 수 없습니다 (${proxyCaPath}). ` +
@@ -33,11 +46,10 @@ export async function sendCommand(vehicleTag, command, payload) {
     );
   }
 
-  const vin = await resolveVehicle(vehicleTag);
   const token = await getAccessToken();
   const ca = fs.readFileSync(proxyCaPath);
   const url = new URL(config.proxyUrl);
-  const body = JSON.stringify(payload && Object.keys(payload).length ? payload : {});
+  const payloadJson = JSON.stringify(body);
   const path =
     `/api/1/vehicles/${encodeURIComponent(vin)}` +
     `/command/${encodeURIComponent(command)}`;
@@ -54,7 +66,7 @@ export async function sendCommand(vehicleTag, command, payload) {
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body),
+          'Content-Length': Buffer.byteLength(payloadJson),
         },
         timeout: 30_000,
       },
@@ -79,7 +91,7 @@ export async function sendCommand(vehicleTag, command, payload) {
       req.destroy(new Error('프록시 응답 시간 초과 (차량이 잠들어 있을 수 있습니다)'));
     });
     req.on('error', reject);
-    req.write(body);
+    req.write(payloadJson);
     req.end();
   });
 }
