@@ -21,9 +21,14 @@ function commandRow(command) {
   const choices = command.choices.length
     ? `<div class="muted">값: ${command.choices.map((c) => `<code>${esc(c)}</code>`).join(', ')}</div>`
     : '';
+  const note = command.note ? `<div class="muted">${esc(command.note)}</div>` : '';
+  const badge =
+    command.route === 'rest'
+      ? '<span class="tag rest">직접</span>'
+      : '<span class="tag sign">서명</span>';
   return `<tr data-search="${esc(`${command.name} ${command.label}`)}">
-  <td><code>${esc(command.name)}</code></td>
-  <td>${esc(command.label)}${choices}</td>
+  <td><code>${esc(command.name)}</code> ${badge}</td>
+  <td>${esc(command.label)}${choices}${note}</td>
   <td>${paramCell(command)}</td>
 </tr>`;
 }
@@ -59,6 +64,9 @@ table{border-collapse:collapse;width:100%;margin:8px 0;font-size:14px}
 th,td{border:1px solid #8884;padding:8px;text-align:left;vertical-align:top}
 th{background:#8881}
 .muted{opacity:.65;font-size:.85em}
+.tag{font-size:11px;padding:1px 6px;border-radius:10px;vertical-align:middle;white-space:nowrap}
+.tag.sign{background:#3a7d3a33;border:1px solid #3a7d3a88}
+.tag.rest{background:#c08a2033;border:1px solid #c08a2088}
 .note{border-left:3px solid #e0a030;background:#e0a03018;padding:10px 14px;margin:14px 0;border-radius:4px}
 .warn{border-left:3px solid #d05050;background:#d0505018;padding:10px 14px;margin:14px 0;border-radius:4px}
 #filter{width:100%;padding:10px;font-size:15px;border-radius:8px;border:1px solid #8886;
@@ -68,9 +76,9 @@ nav a{margin-right:12px;font-size:14px}
 
 <h1>Tesla Fleet API 서버 — API 문서</h1>
 <nav><a href="/">상태 페이지</a><a href="/control">차량 제어</a></nav>
-<p class="muted">이 문서의 명령 목록은 서버에 포함된 서명 프록시
-(<code>vehicle-command v0.4.1</code>)가 실제로 처리하는 ${COMMAND_COUNT}개 명령을
-소스에서 추출한 것입니다.</p>
+<p class="muted">명령 목록은 서버에 포함된 서명 프록시(<code>vehicle-command v0.4.1</code>)
+소스에서 추출한 69개와, 프록시가 구현하지 않아 Fleet API 로 직접 전달하는 12개를 합친
+${COMMAND_COUNT}개입니다.</p>
 
 <h2>1. 인증</h2>
 <p><code>/.well-known/...</code>, <code>/auth/callback</code>, <code>/healthz</code> 를 제외한
@@ -132,6 +140,15 @@ Tesla 앱이 설치된 휴대폰에서 <code>https://tesla.com/_ak/${esc(domain)
 차량 옆에서 승인하세요. 등록 전에는 권한 오류가 납니다. 조회 기능에는 영향이 없습니다.</div>
 <p class="muted">파라미터는 요청 본문에 JSON 으로 보냅니다. "선택" 표시가 없는 것은 필수입니다.
 차량이 잠들어 있으면 먼저 <code>wake_up</code> 을 호출하세요.</p>
+
+<table>
+  <tr><th>표시</th><th>전달 경로</th><th>의미</th></tr>
+  <tr><td><span class="tag sign">서명</span></td><td>서명 프록시 경유</td>
+      <td>개인키로 서명해 전송합니다. 2021년 이후 차량에 필요한 정식 경로입니다.</td></tr>
+  <tr><td><span class="tag rest">직접</span></td><td>Fleet API 직접 호출</td>
+      <td>서명 프록시가 구현하지 않은 명령이라 서명 없이 보냅니다.
+          차량이 서명을 요구하면 Tesla가 거부할 수 있습니다.</td></tr>
+</table>
 
 <input id="filter" type="search" placeholder="명령 검색 (예: charge, 문, 공조)" autocomplete="off">
 ${groups}
