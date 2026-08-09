@@ -175,7 +175,25 @@ https://tesla.com/_ak/<내도메인>
 
 이 절차를 건너뛰면 명령이 권한 오류로 실패합니다. 조회 기능에는 영향이 없습니다.
 
-### 사용법
+### 사용법 — 도우미 스크립트
+
+NAS에서는 `scripts/cmd.sh` 가 API 키와 포트를 `.env`(또는 `data/api-key.txt`)에서 읽어
+대신 호출해 줍니다. 키를 직접 입력할 일이 없습니다.
+
+```sh
+./scripts/cmd.sh <차량ID 또는 VIN> <명령> [JSON 본문]
+```
+
+```sh
+./scripts/cmd.sh 5YJ3E1EB8LF727066 wake                        # 깨우기
+./scripts/cmd.sh 5YJ3E1EB8LF727066 door_unlock                 # 문 열기
+./scripts/cmd.sh 5YJ3E1EB8LF727066 door_lock                   # 문 잠그기
+./scripts/cmd.sh 5YJ3E1EB8LF727066 set_charge_limit '{"percent":80}'
+```
+
+`wake` 는 서명이 필요 없는 `wake_up` 엔드포인트로, 나머지는 서명 프록시로 전달됩니다.
+
+### 사용법 — 직접 호출
 
 ```sh
 # 문 잠금
