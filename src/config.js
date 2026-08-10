@@ -30,6 +30,15 @@ export const config = {
   proxyUrl: process.env.COMMAND_PROXY_URL || 'https://tesla-http-proxy:4443',
   // 차량 별칭. 예: "3=5YJ...,X=7SA..."
   vehicleAliases: process.env.VEHICLE_ALIASES || '',
+  // Fleet API 요금 추정용 단가. 개발자 포털의 "범주별 비용"에서 역산한 값이며,
+  // Tesla 가 단가를 바꾸면 .env 에서 조정하세요.
+  pricing: {
+    command: Number(process.env.PRICE_COMMAND ?? 1.4),
+    data: Number(process.env.PRICE_DATA ?? 2.7),
+    wake: Number(process.env.PRICE_WAKE ?? 25),
+    currency: process.env.PRICE_CURRENCY || '\u20a9',
+    credit: Number(process.env.MONTHLY_CREDIT ?? 14020),
+  },
 };
 
 // 프록시가 생성한 자체 서명 인증서. 이 파일로 프록시를 검증합니다.

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import http2 from 'node:http2';
+import { record } from './usage.js';
 
 // Tesla 공식 앱이 쓰는 공개 클라이언트(ownerapi)로 로그인합니다.
 // 비공식 경로이므로 Tesla가 언제든 막을 수 있습니다. 조회·깨우기 용도로만 씁니다.
@@ -168,6 +169,7 @@ export async function refreshToken(refresh) {
 // /api/1/vehicles 는 2026년부터 412 (fleetapi 전용) 이므로 products 를 씁니다.
 // products 에는 에너지 제품도 섞여 오므로 VIN 이 있는 항목만 거릅니다.
 export async function products(token) {
+  record('owner', '/api/1/products');
   const { status, body } = await jsonRequest(`${OWNER_API_BASE}/api/1/products`, {
     headers: authed(token),
   });
@@ -190,6 +192,7 @@ export const DEFAULT_ENDPOINTS = [
 ].join(';');
 
 export async function vehicleData(token, vehicleId, endpoints = DEFAULT_ENDPOINTS) {
+  record('owner', '/vehicle_data');
   const query = endpoints ? `?endpoints=${encodeURIComponent(endpoints)}` : '';
   return jsonRequest(
     `${OWNER_API_BASE}/api/1/vehicles/${encodeURIComponent(vehicleId)}/vehicle_data${query}`,
@@ -198,6 +201,7 @@ export async function vehicleData(token, vehicleId, endpoints = DEFAULT_ENDPOINT
 }
 
 export async function wakeUp(token, vehicleId) {
+  record('owner', '/wake_up');
   return jsonRequest(`${OWNER_API_BASE}/api/1/vehicles/${encodeURIComponent(vehicleId)}/wake_up`, {
     method: 'POST',
     headers: authed(token),
