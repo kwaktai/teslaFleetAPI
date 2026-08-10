@@ -107,6 +107,12 @@ export function authorizeUrl(pkce) {
   return `${AUTHORIZE_URL}?${query}`;
 }
 
+// 콘솔·네트워크 탭이 긴 주소를 줄여서 보여주기 때문에, 화면의 텍스트를 그대로
+// 복사하면 code 뒷부분이 잘린 채로 들어옵니다. 그 경우를 따로 알려주기 위한 판별입니다.
+export function looksTruncated(pasted) {
+  return /[…]|\.\.\.$/.test(String(pasted || '').trim());
+}
+
 // 붙여넣은 값에서 code 를 뽑습니다. 전체 URL 도 되고 code 만 넣어도 됩니다.
 export function extractCode(pasted) {
   const text = String(pasted || '').trim();
