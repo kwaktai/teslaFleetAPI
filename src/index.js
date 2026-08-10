@@ -215,9 +215,20 @@ function takePkce() {
   }
 }
 
-function ownerPage({ message = '', error = '' } = {}) {
+// PKCE 는 로그인을 시작할 때만 새로 만듭니다.
+// 오류 화면을 다시 그릴 때마다 새로 만들면, 이미 받아 둔 code 와 verifier 가 어긋나
+// 재시도가 무조건 실패합니다(code 는 발급 당시의 verifier 와만 짝이 맞습니다).
+function currentPkce({ force = false } = {}) {
+  if (!force) {
+    const saved = takePkce();
+    if (saved) return saved;
+  }
   const pkce = newPkce();
   savePkce(pkce);
+  return pkce;
+}
+
+function ownerPage({ message = '', error = '', pkce = currentPkce() } = {}) {
   const linked = ownerLinked();
   return `<!doctype html>
 <meta charset="utf-8">
@@ -235,6 +246,7 @@ background:#3457d5;color:#fff;margin-top:8px}
 .ok{border-left:3px solid #3a7d3a;background:#3a7d3a18;padding:10px 14px;border-radius:4px}
 .bad{border-left:3px solid #d05050;background:#d0505018;padding:10px 14px;border-radius:4px}
 .note{border-left:3px solid #e0a030;background:#e0a03018;padding:10px 14px;border-radius:4px}
+.muted{opacity:.7;font-size:.9em}
 ol li{margin:10px 0}
 </style>
 <h1>Owner API 연결</h1>
@@ -276,6 +288,9 @@ Fleet API 로 되돌아가므로 기능이 멈추지는 않습니다. 명령(문
   <li>복사한 주소를 아래에 붙여넣고 연결을 누릅니다. (주소 전체를 넣어도 되고 code 값만 넣어도 됩니다.)</li>
 </ol>
 
+<p class="muted"><a href="/owner?new=1">↻ 새 로그인 세션으로 다시 시작</a>
+— code 가 만료되었거나 이미 사용된 경우 여기를 눌러 새 주소를 받으세요.</p>
+
 <form method="POST" action="/owner/callback">
   <textarea name="pasted" placeholder="tesla://auth/callback?code=... 를 붙여넣으세요" autofocus></textarea>
   <button type="submit">연결하기</button>
@@ -286,7 +301,9 @@ ${linked ? `<form method="POST" action="/owner/logout" style="margin-top:24px">
 </form>` : ''}`;
 }
 
-app.get('/owner', (_req, res) => res.type('html').send(ownerPage()));
+app.get('/owner', (req, res) =>
+  res.type('html').send(ownerPage({ pkce: currentPkce({ force: req.query.new === '1' }) }))
+);
 
 app.post('/owner/callback', async (req, res) => {
   const pasted = String(req.body?.pasted || '');
