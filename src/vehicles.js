@@ -1,5 +1,5 @@
 import { config } from './config.js';
-import { fleetFetch } from './tesla.js';
+import { readVehicleList } from './reads.js';
 
 const VIN_PATTERN = /^[A-HJ-NPR-Z0-9]{17}$/i;
 
@@ -27,7 +27,7 @@ export function aliasEntries() {
 
 // 별칭·차량 이름·ID·VIN 중 무엇을 넣어도 VIN 으로 바꿔 줍니다.
 // 명령 서명 프록시는 VIN 만 받고, 조회 API 는 VIN 도 받으므로 VIN 으로 통일합니다.
-export async function resolveVehicle(tag, listVehicles = () => fleetFetch('/api/1/vehicles')) {
+export async function resolveVehicle(tag, listVehicles = readVehicleList) {
   const raw = String(tag).trim();
   const key = raw.toLowerCase();
 

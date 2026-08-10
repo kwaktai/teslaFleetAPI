@@ -14,7 +14,7 @@ import {
   newPkce,
 } from './ownerApi.js';
 import { clearOwnerTokens, ownerLinked, saveOwnerTokens } from './ownerStore.js';
-import { readVehicleData, requestWake } from './reads.js';
+import { readVehicleData, readVehicleList, requestWake } from './reads.js';
 import { clearUsage, monthKey, snapshot } from './usage.js';
 import { aliasEntries, resolveVehicle } from './vehicles.js';
 import { ensureKeys, publicKeyPath } from './keys.js';
@@ -424,8 +424,8 @@ app.post('/api/usage/reset', (_req, res) => {
 // ---------- 차량 API ----------
 app.get('/api/vehicles', async (_req, res) => {
   try {
-    const result = await fleetFetch('/api/1/vehicles');
-    res.status(result.status).json(result.body);
+    const result = await readVehicleList();
+    res.set('X-Data-Source', result.source).status(result.status).json(result.body);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
