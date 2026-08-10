@@ -5,6 +5,15 @@ import { config, assertConfigured, redirectUri } from './config.js';
 import { ensureApiKey, getApiKey, requireApiKey } from './auth.js';
 import { COMMON_COMMANDS, proxyReady, sendCommand } from './commands.js';
 import { renderDocument } from './document.js';
+import {
+  authorizeUrl as ownerAuthorizeUrl,
+  exchangeCode as ownerExchangeCode,
+  extractCode,
+  extractState,
+  newPkce,
+} from './ownerApi.js';
+import { clearOwnerTokens, ownerLinked, saveOwnerTokens } from './ownerStore.js';
+import { readVehicleData, requestWake } from './reads.js';
 import { aliasEntries, resolveVehicle } from './vehicles.js';
 import { ensureKeys, publicKeyPath } from './keys.js';
 import { loadTokens, clearTokens } from './tokenStore.js';
@@ -18,6 +27,7 @@ import {
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 
 // 공개키·콜백·헬스체크를 제외한 모든 경로에 API 키를 요구합니다.
 ensureApiKey();
@@ -67,6 +77,7 @@ pre{background:#f4f4f4;padding:10px;border-radius:6px;overflow-x:auto;white-spac
   <li>공개키 파일: ${keyExists ? '✅ 자동 생성됨' : '❌ 없음 — 컨테이너 로그 확인 필요'}</li>
   <li>Tesla 계정 토큰: ${tokens ? '✅ 발급됨' : '❌ 없음'}</li>
   <li>명령 서명 프록시: ${proxyReady() ? '✅ 준비됨' : '❌ 미실행 (명령 불가, 조회는 가능)'}</li>
+  <li>Owner API: ${ownerLinked() ? '✅ 연결됨 — 조회·깨우기가 Fleet API 요금 없이 나갑니다' : '❌ 미연결 — 조회·깨우기도 Fleet API 사용'} (<a href="/owner">설정</a>)</li>
   <li>리전: <code>${config.region}</code> / 도메인: <code>${domain}</code></li>
 </ul>
 <h2>설정 순서</h2>
@@ -181,6 +192,124 @@ app.get('/admin/public-key-status', async (_req, res) => {
   }
 });
 
+
+// ---------- Owner API 연결 (조회·깨우기 비용 절감용) ----------
+// tesla://auth/callback 은 브라우저가 열 수 없는 커스텀 스킴이라, 콜백을 서버가 직접
+// 받을 수 없습니다. 로그인 후 이동하려던 주소를 사용자가 붙여넣는 방식으로 처리합니다.
+const pkceFile = () => `${config.dataDir}/owner-pkce.json`;
+
+function savePkce(pkce) {
+  fs.mkdirSync(config.dataDir, { recursive: true });
+  fs.writeFileSync(pkceFile(), JSON.stringify({ ...pkce, created: Date.now() }), { mode: 0o600 });
+}
+
+function takePkce() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(pkceFile(), 'utf8'));
+    // 로그인은 보통 몇 분 안에 끝납니다. 30분이 지나면 무효로 봅니다.
+    if (Date.now() - saved.created > 30 * 60 * 1000) return null;
+    return saved;
+  } catch {
+    return null;
+  }
+}
+
+function ownerPage({ message = '', error = '' } = {}) {
+  const pkce = newPkce();
+  savePkce(pkce);
+  const linked = ownerLinked();
+  return `<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Owner API 연결</title>
+<style>
+:root{color-scheme:light dark}
+body{font-family:-apple-system,sans-serif;max-width:760px;margin:0 auto;padding:20px;line-height:1.6}
+code{background:#8882;padding:2px 5px;border-radius:4px;font-size:.9em}
+pre{background:#8881;padding:12px;border-radius:8px;overflow-x:auto;font-size:13px;white-space:pre-wrap;word-break:break-all}
+textarea{width:100%;min-height:90px;font-size:14px;padding:10px;border-radius:8px;
+border:1px solid #8886;background:transparent;color:inherit}
+button{font-size:16px;padding:12px 20px;border-radius:8px;border:1px solid #888;
+background:#3457d5;color:#fff;margin-top:8px}
+.ok{border-left:3px solid #3a7d3a;background:#3a7d3a18;padding:10px 14px;border-radius:4px}
+.bad{border-left:3px solid #d05050;background:#d0505018;padding:10px 14px;border-radius:4px}
+.note{border-left:3px solid #e0a030;background:#e0a03018;padding:10px 14px;border-radius:4px}
+ol li{margin:10px 0}
+</style>
+<h1>Owner API 연결</h1>
+<p><a href="/">← 상태 페이지</a></p>
+${message ? `<p class="ok">${message}</p>` : ''}
+${error ? `<p class="bad">${error}</p>` : ''}
+<p>연결 상태: <strong>${linked ? '✅ 연결됨' : '❌ 미연결'}</strong>
+${linked ? '— 차량 조회와 깨우기가 Owner API 로 나갑니다 (Fleet API 요금 없음).' : '— 지금은 모든 요청이 Fleet API 로 나갑니다.'}</p>
+
+<div class="note"><strong>Owner API 는 Tesla 공식 앱의 비공개 경로입니다.</strong>
+Tesla 가 예고 없이 막을 수 있고 2026년 들어 여러 번 조여졌습니다. 막히면 서버가 자동으로
+Fleet API 로 되돌아가므로 기능이 멈추지는 않습니다. 명령(문 잠금 등)은 서명이 필요해
+항상 Fleet API 를 씁니다.</div>
+
+<h2>연결 방법</h2>
+<div class="note"><strong>아이폰이 아니라 컴퓨터 브라우저에서 진행하세요.</strong>
+로그인 후 Tesla 는 <code>tesla://auth/callback?code=…</code> 로 이동시키는데,
+아이폰에서는 Tesla 앱이 이 주소를 가로채 버려 코드를 볼 수 없습니다.</div>
+<ol>
+  <li><strong>브라우저 개발자 도구를 먼저 엽니다.</strong>
+      Chrome: <code>⌥⌘I</code> → Network 탭 → <em>Preserve log</em> 체크.
+      Safari: 설정에서 개발자용 메뉴를 켠 뒤 <code>⌥⌘I</code> → 네트워크.</li>
+  <li>아래 주소를 같은 창에서 열고 Tesla 계정으로 로그인합니다.
+      <pre>${ownerAuthorizeUrl(pkce)}</pre>
+      <a href="${ownerAuthorizeUrl(pkce)}">이 링크로 열기</a></li>
+  <li>로그인이 끝나면 "페이지를 열 수 없습니다" 같은 오류가 납니다. <strong>정상입니다.</strong>
+      개발자 도구 Network 목록에서 <code>tesla://auth/callback?code=…</code> 로 시작하는
+      항목을 찾아 <em>주소 전체를 복사</em>하세요.</li>
+  <li>복사한 주소를 아래에 붙여넣고 연결을 누릅니다. (주소 전체를 넣어도 되고 code 값만 넣어도 됩니다.)</li>
+</ol>
+
+<form method="POST" action="/owner/callback">
+  <textarea name="pasted" placeholder="tesla://auth/callback?code=... 를 붙여넣으세요" autofocus></textarea>
+  <button type="submit">연결하기</button>
+</form>
+
+${linked ? `<form method="POST" action="/owner/logout" style="margin-top:24px">
+  <button type="submit" style="background:#a33">연결 해제</button>
+</form>` : ''}`;
+}
+
+app.get('/owner', (_req, res) => res.type('html').send(ownerPage()));
+
+app.post('/owner/callback', async (req, res) => {
+  const pasted = String(req.body?.pasted || '');
+  const code = extractCode(pasted);
+  const pkce = takePkce();
+
+  if (!code) {
+    return res.type('html').send(ownerPage({ error: '붙여넣은 값에서 code 를 찾지 못했습니다.' }));
+  }
+  if (!pkce) {
+    return res
+      .type('html')
+      .send(ownerPage({ error: '로그인 세션이 만료되었습니다. 아래 주소로 다시 시작하세요.' }));
+  }
+  const state = extractState(pasted);
+  if (state && state !== pkce.state) {
+    return res.type('html').send(ownerPage({ error: 'state 값이 일치하지 않습니다. 다시 시도하세요.' }));
+  }
+
+  try {
+    const tokens = await ownerExchangeCode(code, pkce.verifier);
+    saveOwnerTokens(tokens);
+    fs.rmSync(pkceFile(), { force: true });
+    res.type('html').send(ownerPage({ message: 'Owner API 연결이 완료되었습니다.' }));
+  } catch (e) {
+    res.type('html').send(ownerPage({ error: e.message }));
+  }
+});
+
+app.post('/owner/logout', (_req, res) => {
+  clearOwnerTokens();
+  res.type('html').send(ownerPage({ message: '연결을 해제했습니다.' }));
+});
+
 // ---------- 차량 API ----------
 app.get('/api/vehicles', async (_req, res) => {
   try {
@@ -191,11 +320,14 @@ app.get('/api/vehicles', async (_req, res) => {
   }
 });
 
+// 조회와 깨우기는 Owner API 가 연결되어 있으면 그쪽을 씁니다 (Fleet API 요금 절약).
+// 어느 쪽으로 나갔는지는 X-Data-Source 헤더로 알 수 있습니다.
 app.get('/api/vehicles/:id/vehicle_data', async (req, res) => {
   try {
     const vin = await resolveVehicle(req.params.id);
-    const result = await fleetFetch(`/api/1/vehicles/${encodeURIComponent(vin)}/vehicle_data`);
-    res.status(result.status).json(result.body);
+    const endpoints = typeof req.query.endpoints === 'string' ? req.query.endpoints : undefined;
+    const result = await readVehicleData(vin, endpoints);
+    res.set('X-Data-Source', result.source).status(result.status).json(result.body);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -204,10 +336,8 @@ app.get('/api/vehicles/:id/vehicle_data', async (req, res) => {
 app.post('/api/vehicles/:id/wake_up', async (req, res) => {
   try {
     const vin = await resolveVehicle(req.params.id);
-    const result = await fleetFetch(`/api/1/vehicles/${encodeURIComponent(vin)}/wake_up`, {
-      method: 'POST',
-    });
-    res.status(result.status).json(result.body);
+    const result = await requestWake(vin);
+    res.set('X-Data-Source', result.source).status(result.status).json(result.body);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

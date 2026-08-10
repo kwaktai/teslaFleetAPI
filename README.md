@@ -8,6 +8,7 @@
 - 차량 목록/상태 조회, 깨우기(wake_up) API
 - 차량 명령(잠금·공조·충전) — 서명 프록시 포함
 - API 키 기반 접근 제어
+- Owner API 연동 — 조회·깨우기를 무과금 경로로 (선택)
 
 ## 사전 준비물
 
@@ -138,6 +139,7 @@ curl https://<내도메인>/api/vehicles/<id>/vehicle_data
 | GET | `/` | 상태 페이지 |
 | GET | `/control` | 차량 제어 페이지 (버튼) |
 | GET | `/document` | API 문서 (전체 명령 목록) |
+| GET | `/owner` | Owner API 연결 (조회·깨우기 비용 절감) |
 | GET | `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Tesla 검증용 공개키 |
 | GET | `/auth/login` | Tesla OAuth 로그인 시작 |
 | GET | `/auth/callback` | OAuth 콜백 (Tesla가 호출) |
@@ -301,6 +303,53 @@ https://<내도메인>/document
 | 권한/서명 오류 | 가상 키 미등록 → 위 `tesla.com/_ak/...` 링크로 등록 |
 | 응답 시간 초과 | 차량 절전 상태 → `wake_up` 후 재시도 |
 | `unauthorized` | 개발자 포털에서 `vehicle_cmds` 권한 미선택 → 권한 추가 후 재로그인 |
+
+## 8단계 — Owner API 연결 (선택, 비용 절감)
+
+Fleet API 는 요청마다 과금됩니다. 월 $10 크레딧은 Tesla 문서 기준
+*데이터 스트리밍 + 하루 명령 100회 + 차량 2대 하루 깨우기 2회* 를 덮으므로,
+크레딧을 소진시키는 것은 보통 **명령이 아니라 잦은 상태 조회·깨우기** 입니다.
+
+Owner API(Tesla 공식 앱이 쓰는 `ownerapi` 클라이언트)를 연결하면
+**조회·깨우기·상태 폴링이 그쪽으로 나가고, 과금 대상인 Fleet API 는 명령에만 사용**됩니다.
+
+| 기능 | 연결 전 | 연결 후 |
+|---|---|---|
+| 차량 상태 조회 | Fleet (과금) | Owner (무료) |
+| 깨우기 · 온라인 폴링 | Fleet (과금) | Owner (무료) |
+| 명령 (문 잠금 등) | Fleet | Fleet (서명 필요, 변경 없음) |
+
+> **Owner API 는 비공식 경로입니다.** Tesla 가 예고 없이 막을 수 있고 2026년에 여러 번
+> 조여졌습니다. 차단(401/403)되거나 오류가 나면 서버가 **자동으로 Fleet API 로 되돌아가므로**
+> 기능이 멈추지는 않습니다. 응답의 `X-Data-Source` 헤더로 어느 쪽을 썼는지 확인할 수 있습니다.
+
+### 연결 방법
+
+```
+https://<내도메인>/owner
+```
+
+**아이폰이 아니라 컴퓨터 브라우저에서** 진행하세요. 로그인 후 Tesla 는
+`tesla://auth/callback?code=…` 로 이동시키는데, 아이폰에서는 Tesla 앱이 이 주소를
+가로채 버려 코드를 볼 수 없습니다.
+
+1. 브라우저 개발자 도구 → **Network** 탭 → *Preserve log* 체크
+2. 페이지에 표시된 authorize 주소를 열고 Tesla 계정으로 로그인
+3. "페이지를 열 수 없습니다" 오류가 나면 정상입니다.
+   Network 목록에서 `tesla://auth/callback?code=…` 항목의 **주소 전체를 복사**
+4. 페이지의 입력칸에 붙여넣고 **연결하기**
+
+토큰은 `data/owner-tokens.json` 에 저장되고 자동 갱신됩니다.
+연결 해제는 같은 페이지의 **연결 해제** 버튼입니다.
+
+### 구현 메모
+
+- 2026-06 부터 `auth.tesla.com` 과 `owner-api` 는 **HTTP/2 만** 받습니다.
+  Node 의 기본 `fetch` 는 HTTP/1.1 이라 `node:http2` 로 직접 요청합니다.
+- 차량 목록은 `/api/1/products` 를 씁니다. `/api/1/vehicles` 는 2026년부터
+  `412 only available on fleetapi` 로 막혔습니다.
+- `vehicle_data` 는 `endpoints` 필터를 붙여 호출합니다. 필터 없이 부르면 차량 화면에
+  "타사 앱이 실시간 위치 요청 중" 경고가 상시 표시됩니다.
 
 ## 접근 제어 (API 키)
 
