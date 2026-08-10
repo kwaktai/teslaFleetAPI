@@ -3,6 +3,7 @@ import https from 'node:https';
 import { config, proxyCaPath } from './config.js';
 import { REST_COMMANDS } from './catalog.js';
 import { fleetFetch, getAccessToken } from './tesla.js';
+import { readVehicleState, requestWake } from './reads.js';
 import { resolveVehicle } from './vehicles.js';
 
 // 자주 쓰는 명령 목록 (상태 페이지 안내용). 여기 없는 명령도 그대로 전달됩니다.
@@ -109,11 +110,11 @@ const WAKE_POLL_MS = 2000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // 차량이 online 이 될 때까지 기다립니다. 온라인이면 즉시 true 를 돌려줍니다.
+// 상태 조회는 Owner API 가 연결되어 있으면 그쪽으로 나갑니다 (폴링 비용 절감).
 async function waitUntilOnline(vin) {
   const deadline = Date.now() + WAKE_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const { status, body } = await fleetFetch(`/api/1/vehicles/${encodeURIComponent(vin)}`);
-    if (status === 200 && body?.response?.state === 'online') return true;
+    if ((await readVehicleState(vin)) === 'online') return true;
     await sleep(WAKE_POLL_MS);
   }
   return false;
@@ -129,7 +130,7 @@ export async function sendCommand(vehicleTag, command, payload, { wake = false }
   const first = await deliver(vin, command, body);
   if (!wake || !looksAsleep(first)) return first;
 
-  await fleetFetch(`/api/1/vehicles/${encodeURIComponent(vin)}/wake_up`, { method: 'POST' });
+  await requestWake(vin);
   if (!(await waitUntilOnline(vin))) {
     // 제한 시간 안에 깨어나지 않으면 원래 응답을 그대로 돌려줍니다.
     return first;

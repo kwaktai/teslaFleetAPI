@@ -108,6 +108,7 @@ ${COMMAND_COUNT}개입니다.</p>
   <tr><td>GET</td><td><code>/</code></td><td>상태 페이지</td></tr>
   <tr><td>GET</td><td><code>/control</code></td><td>버튼식 차량 제어</td></tr>
   <tr><td>GET</td><td><code>/document</code></td><td>이 문서</td></tr>
+  <tr><td>GET</td><td><code>/owner</code></td><td>Owner API 연결 (조회·깨우기 비용 절감)</td></tr>
   <tr><td>GET</td><td><code>/api/vehicles</code></td><td>차량 목록</td></tr>
   <tr><td>GET</td><td><code>/api/vehicles/:차량/vehicle_data</code></td><td>차량 상세 상태</td></tr>
   <tr><td>POST</td><td><code>/api/vehicles/:차량/wake_up</code></td><td>차량 깨우기</td></tr>
@@ -124,7 +125,19 @@ ${COMMAND_COUNT}개입니다.</p>
 브라우저 주소창은 GET만 보내므로 <code>Cannot GET</code> 이 납니다.
 브라우저에서 실행하려면 <a href="/control">제어 페이지</a>를 쓰세요.</div>
 
-<h2>4. 잠든 차량 자동 처리</h2>
+<h2>4. 요금 경로</h2>
+<p>Fleet API 는 요청마다 과금됩니다. <a href="/owner">Owner API</a> 를 연결하면
+조회·깨우기·상태 폴링이 무과금 경로로 나가고, Fleet API 는 명령에만 쓰입니다.</p>
+<table>
+  <tr><th>기능</th><th>Owner 미연결</th><th>Owner 연결</th></tr>
+  <tr><td>차량 상태 조회</td><td>Fleet (과금)</td><td>Owner (무료)</td></tr>
+  <tr><td>깨우기 · 온라인 폴링</td><td>Fleet (과금)</td><td>Owner (무료)</td></tr>
+  <tr><td>명령</td><td>Fleet</td><td>Fleet (서명 필요)</td></tr>
+</table>
+<p class="muted">응답의 <code>X-Data-Source</code> 헤더가 <code>owner</code> / <code>fleet</code>
+중 어느 경로로 나갔는지 알려줍니다. Owner API 가 막히면 자동으로 Fleet 로 되돌아갑니다.</p>
+
+<h2>5. 잠든 차량 자동 처리</h2>
 <p>명령 URL 뒤에 <code>?wake=1</code> 을 붙이면, 차량이 자고 있어 명령이 거부된 경우에만
 서버가 깨우고 온라인이 되는 즉시 한 번 재시도합니다.</p>
 <table>
@@ -138,7 +151,7 @@ ${COMMAND_COUNT}개입니다.</p>
 <p class="muted">단축어에서 상태를 먼저 조회해 분기할 필요가 없습니다. 동작 하나면 충분합니다.
 <a href="/control">제어 페이지</a>의 버튼도 이 방식을 씁니다.</p>
 
-<h2>5. 호출 예시</h2>
+<h2>6. 호출 예시</h2>
 <pre>curl -X POST -H "X-API-Key: &lt;키&gt;" \\
   https://${esc(domain)}/api/vehicles/3/command/door_unlock</pre>
 <pre>curl -X POST -H "X-API-Key: &lt;키&gt;" -H "Content-Type: application/json" \\
@@ -150,7 +163,7 @@ ${COMMAND_COUNT}개입니다.</p>
 <p><strong>iOS 단축어</strong>: "URL 콘텐츠 가져오기" → 방식 <code>POST</code> →
 헤더에 <code>X-API-Key</code> 추가 → 값이 필요한 명령은 본문을 JSON 으로 지정.</p>
 
-<h2>6. 차량 명령 (${COMMAND_COUNT}개)</h2>
+<h2>7. 차량 명령 (${COMMAND_COUNT}개)</h2>
 <div class="warn"><strong>명령을 쓰려면 차량마다 가상 키 등록이 필요합니다.</strong><br>
 Tesla 앱이 설치된 휴대폰에서 <code>https://tesla.com/_ak/${esc(domain)}</code> 를 열고
 차량 옆에서 승인하세요. 등록 전에는 권한 오류가 납니다. 조회 기능에는 영향이 없습니다.</div>
