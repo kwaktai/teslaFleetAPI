@@ -335,9 +335,15 @@ https://<내도메인>/owner
 
 1. 브라우저 개발자 도구 → **Network** 탭 → *Preserve log* 체크
 2. 페이지에 표시된 authorize 주소를 열고 Tesla 계정으로 로그인
-3. "페이지를 열 수 없습니다" 오류가 나면 정상입니다.
-   Network 목록에서 `tesla://auth/callback?code=…` 항목의 **주소 전체를 복사**
-4. 페이지의 입력칸에 붙여넣고 **연결하기**
+3. "페이지를 열 수 없습니다" / `scheme does not have a registered handler` 오류가 나면 정상입니다.
+4. `code` 를 가져옵니다. **화면에 보이는 글자를 드래그해 복사하면 안 됩니다** —
+   개발자 도구가 긴 주소를 `…` 로 줄여 표시해 뒷부분이 잘립니다. 둘 중 하나를 쓰세요.
+   - **Network 탭** → `authorize?client_id=…` 항목 → **Headers → Response Headers → `location`**
+     (잘리지 않은 원본이라 가장 확실)
+   - **Console 탭** → 파란색 `tesla://…` 링크 **우클릭 → 링크 주소 복사**
+5. 페이지의 입력칸에 붙여넣고 **연결하기**
+
+`…` 가 섞인 값을 넣으면 서버가 잘린 주소임을 알려줍니다.
 
 토큰은 `data/owner-tokens.json` 에 저장되고 자동 갱신됩니다.
 연결 해제는 같은 페이지의 **연결 해제** 버튼입니다.

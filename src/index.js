@@ -10,6 +10,7 @@ import {
   exchangeCode as ownerExchangeCode,
   extractCode,
   extractState,
+  looksTruncated,
   newPkce,
 } from './ownerApi.js';
 import { clearOwnerTokens, ownerLinked, saveOwnerTokens } from './ownerStore.js';
@@ -259,9 +260,19 @@ Fleet API 로 되돌아가므로 기능이 멈추지는 않습니다. 명령(문
   <li>아래 주소를 같은 창에서 열고 Tesla 계정으로 로그인합니다.
       <pre>${ownerAuthorizeUrl(pkce)}</pre>
       <a href="${ownerAuthorizeUrl(pkce)}">이 링크로 열기</a></li>
-  <li>로그인이 끝나면 "페이지를 열 수 없습니다" 같은 오류가 납니다. <strong>정상입니다.</strong>
-      개발자 도구 Network 목록에서 <code>tesla://auth/callback?code=…</code> 로 시작하는
-      항목을 찾아 <em>주소 전체를 복사</em>하세요.</li>
+  <li>로그인이 끝나면 "페이지를 열 수 없습니다" / <code>scheme does not have a registered
+      handler</code> 오류가 납니다. <strong>정상입니다.</strong></li>
+  <li>이제 <code>code</code> 를 가져옵니다.
+      <strong>화면에 보이는 글자를 드래그해 복사하면 안 됩니다</strong> —
+      개발자 도구가 긴 주소를 <code>…</code> 로 줄여 표시하기 때문에 뒷부분이 잘립니다.
+      아래 둘 중 하나로 <em>전체 값</em>을 복사하세요.
+      <ul>
+        <li><strong>Network 탭</strong> → <code>authorize?client_id=…</code> 항목 클릭 →
+            <strong>Headers → Response Headers → <code>location</code></strong>
+            (잘리지 않은 원본이라 가장 확실합니다)</li>
+        <li><strong>Console 탭</strong> → 파란색 <code>tesla://…</code> 링크
+            <strong>우클릭 → 링크 주소 복사</strong></li>
+      </ul></li>
   <li>복사한 주소를 아래에 붙여넣고 연결을 누릅니다. (주소 전체를 넣어도 되고 code 값만 넣어도 됩니다.)</li>
 </ol>
 
@@ -282,6 +293,16 @@ app.post('/owner/callback', async (req, res) => {
   const code = extractCode(pasted);
   const pkce = takePkce();
 
+  if (looksTruncated(pasted)) {
+    return res.type('html').send(
+      ownerPage({
+        error:
+          '붙여넣은 주소가 잘려 있습니다(… 이 포함됨). 개발자 도구에 <em>보이는 글자</em>를 ' +
+          '드래그해 복사하면 뒷부분이 잘립니다. 콘솔의 링크를 <strong>우클릭 → 링크 주소 복사</strong>' +
+          ' 하거나, 네트워크 탭에서 <code>authorize</code> 요청의 <strong>응답 헤더 location</strong> 값을 복사하세요.',
+      })
+    );
+  }
   if (!code) {
     return res.type('html').send(ownerPage({ error: '붙여넣은 값에서 code 를 찾지 못했습니다.' }));
   }
