@@ -25,6 +25,23 @@ async function viaOwner(vin, run) {
   }
 }
 
+// 차량 목록도 과금 대상(데이터)입니다. 제어 페이지가 열릴 때마다 부르므로
+// Owner API 가 있으면 그쪽에서 받아옵니다. products 응답은 Fleet 의 차량 항목과
+// 필드 구성이 사실상 같아 그대로 돌려줘도 됩니다.
+export async function readVehicleList() {
+  const token = await ownerAccessToken();
+  if (token) {
+    try {
+      const list = await products(token);
+      return { status: 200, body: { response: list, count: list.length }, source: 'owner' };
+    } catch (e) {
+      console.warn(`Owner API 차량 목록 실패: ${e.message} — Fleet API 로 전환합니다.`);
+    }
+  }
+  const result = await fleetFetch('/api/1/vehicles');
+  return { ...result, source: 'fleet' };
+}
+
 export async function readVehicleData(vin, endpoints = DEFAULT_ENDPOINTS) {
   const owner = await viaOwner(vin, (token, id) => vehicleData(token, id, endpoints));
   if (owner) return owner;
