@@ -463,6 +463,8 @@ app.get('/document', (_req, res) => {
 // 명령은 POST 전용이라 주소창으로는 호출할 수 없습니다. (브라우저·메신저가 링크를
 // 미리 열어보는 경우가 있어, GET 으로 열어두면 실수로 차가 열릴 수 있습니다.)
 // 이 페이지를 북마크해 두고 버튼으로 실행하세요.
+// body 가 있으면 그대로 JSON 본문으로 보냅니다.
+// enable 을 받는 토글 명령은 켜기/끄기를 각각 버튼으로 둡니다.
 const CONTROL_BUTTONS = [
   { command: 'wake_up', label: '깨우기' },
   { command: 'door_unlock', label: '문 열기', confirm: true },
@@ -471,6 +473,10 @@ const CONTROL_BUTTONS = [
   { command: 'auto_conditioning_stop', label: '공조 끄기' },
   { command: 'flash_lights', label: '전조등' },
   { command: 'honk_horn', label: '경적' },
+  { command: 'keep_accessory_power_mode', label: '액세서리 전원 유지', body: { enable: true } },
+  { command: 'keep_accessory_power_mode', label: '액세서리 전원 해제', body: { enable: false } },
+  { command: 'set_low_power_mode', label: '저전력 모드 켜기', body: { enable: true } },
+  { command: 'set_low_power_mode', label: '저전력 모드 끄기', body: { enable: false } },
 ];
 
 app.get('/control', (_req, res) => {
@@ -506,9 +512,14 @@ async function run(vehicle, button) {
     // 자고 있으면 서버가 깨운 뒤 재시도합니다. 깨어 있으면 지연 없이 바로 실행됩니다.
     : '/api/vehicles/' + encodeURIComponent(vehicle.vin) + '/command/' + button.command + '?wake=1';
   document.querySelectorAll('button').forEach(b => b.disabled = true);
-  out.textContent = vehicle.name + ' — ' + button.label + ' 요청 중...';
+  const detail = button.body ? ' ' + JSON.stringify(button.body) : '';
+  out.textContent = vehicle.name + ' — ' + button.label + detail + ' 요청 중...';
   try {
-    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(button.body || {}),
+    });
     const text = await res.text();
     let body = text;
     try { body = JSON.stringify(JSON.parse(text), null, 2); } catch {}
