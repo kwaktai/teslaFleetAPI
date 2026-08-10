@@ -1,4 +1,5 @@
 import { config, redirectUri } from './config.js';
+import { record } from './usage.js';
 import { loadTokens, saveTokens } from './tokenStore.js';
 
 // ---------- OAuth ----------
@@ -77,6 +78,8 @@ export async function getPartnerToken() {
 
 export async function fleetFetch(pathname, { method = 'GET', token, body } = {}) {
   const accessToken = token ?? (await getAccessToken());
+  // Fleet API 는 요청마다 과금되므로 나가기 전에 기록합니다.
+  record('fleet', pathname);
   const res = await fetch(`${config.audience}${pathname}`, {
     method,
     headers: {

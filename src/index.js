@@ -15,6 +15,7 @@ import {
 } from './ownerApi.js';
 import { clearOwnerTokens, ownerLinked, saveOwnerTokens } from './ownerStore.js';
 import { readVehicleData, requestWake } from './reads.js';
+import { clearUsage, monthKey, snapshot } from './usage.js';
 import { aliasEntries, resolveVehicle } from './vehicles.js';
 import { ensureKeys, publicKeyPath } from './keys.js';
 import { loadTokens, clearTokens } from './tokenStore.js';
@@ -71,7 +72,12 @@ app.get('/', (_req, res) => {
 code{background:#eee;padding:2px 6px;border-radius:4px}li{margin:6px 0}
 button{font-size:15px;padding:8px 16px;border-radius:6px;border:1px solid #888;
 background:#3457d5;color:#fff;cursor:pointer}button:disabled{opacity:.6;cursor:default}
-pre{background:#f4f4f4;padding:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap}</style>
+pre{background:#f4f4f4;padding:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap}
+table.usage{border-collapse:collapse;font-size:15px;margin:8px 0}
+table.usage th,table.usage td{padding:6px 14px 6px 0;text-align:left}
+table.usage .num{text-align:right;padding-right:0;padding-left:18px}
+table.usage tr.total td{border-top:1px solid #ccc}
+.muted{opacity:.6;font-size:.85em;font-weight:normal}</style>
 <h1>Tesla Fleet API 서버</h1>
 <ul>
   <li>환경변수: ${missing.length ? `❌ 누락 — ${missing.join(', ')}` : '✅ 설정됨'}</li>
@@ -113,6 +119,13 @@ ${COMMON_COMMANDS.map(([c, label]) => `<code>${c}</code>(${label})`).join(', ')}
 curl -X POST -H "X-API-Key: ${getApiKey()}" -H "Content-Type: application/json" \\
   -d '{"percent":80}' \\
   https://${domain}/api/vehicles/&lt;차량ID&gt;/command/set_charge_limit</pre>
+
+<h2>이번 달 API 사용량 <span style="font-size:14px;font-weight:normal">(${monthKey()})</span></h2>
+<p>Fleet API 는 요청마다 과금됩니다. Owner API 로 나간 것은 요금이 붙지 않습니다.
+서버가 직접 센 값이라 Tesla 청구서와 소수점까지 같지는 않지만, 어느 쪽이 얼마나 쓰이는지
+바로 알 수 있습니다.</p>
+${usageTable()}
+<p><a href="/api/usage">전체 기록 (JSON)</a> — 지난달 이전까지 함께 볼 수 있습니다.</p>
 
 <h2>터미널에서 호출하기</h2>
 <p>이 페이지는 API 키로 보호됩니다. 브라우저는 쿠키로 유지되지만,
@@ -346,6 +359,66 @@ app.post('/owner/callback', async (req, res) => {
 app.post('/owner/logout', (_req, res) => {
   clearOwnerTokens();
   res.type('html').send(ownerPage({ message: '연결을 해제했습니다.' }));
+});
+
+
+// 이번 달 사용량을 표로 그립니다. 종류는 Tesla 과금 구분과 같습니다.
+function usageTable() {
+  const [current] = snapshot();
+  const { currency, credit, command, data, wake } = config.pricing;
+  const money = (n) => `${currency}${n.toLocaleString()}`;
+
+  if (!current) {
+    return '<p><em>아직 기록된 호출이 없습니다.</em></p>';
+  }
+
+  const kinds = [
+    ['data', '조회', data],
+    ['wake', '깨우기', wake],
+    ['command', '명령', command],
+  ];
+  const rows = kinds
+    .map(([kind, label, unit]) => {
+      const fleetCount = current.fleet[kind] || 0;
+      const ownerCount = current.owner[kind] || 0;
+      if (!fleetCount && !ownerCount) return '';
+      return `<tr>
+        <td>${label} <span class="muted">(건당 ${money(unit)})</span></td>
+        <td class="num">${fleetCount || 0}</td>
+        <td class="num">${fleetCount ? money(Math.round(fleetCount * unit)) : '-'}</td>
+        <td class="num">${ownerCount || 0}</td>
+      </tr>`;
+    })
+    .join('');
+
+  const remaining = Math.max(0, credit - current.fleetCost);
+  const pct = credit ? Math.min(100, Math.round((current.fleetCost / credit) * 100)) : 0;
+
+  return `<table class="usage">
+  <tr><th>종류</th><th class="num">Fleet 요청</th><th class="num">예상 요금</th>
+      <th class="num">Owner 요청<br><span class="muted">(무료)</span></th></tr>
+  ${rows}
+  <tr class="total"><td><strong>합계</strong></td>
+    <td class="num"><strong>${current.fleetTotal}</strong></td>
+    <td class="num"><strong>${money(current.fleetCost)}</strong></td>
+    <td class="num">${current.ownerTotal}</td></tr>
+</table>
+<p>월 크레딧 ${money(credit)} 중 <strong>${money(current.fleetCost)}</strong> 사용 (${pct}%),
+남은 금액 <strong>${money(remaining)}</strong>.
+${
+  current.savedCost > 0
+    ? `Owner API 로 <strong>${money(current.savedCost)}</strong> 아꼈습니다.`
+    : ''
+}</p>`;
+}
+
+app.get('/api/usage', (_req, res) => {
+  res.json({ current: monthKey(), months: snapshot() });
+});
+
+app.post('/api/usage/reset', (_req, res) => {
+  clearUsage();
+  res.json({ ok: true });
 });
 
 // ---------- 차량 API ----------

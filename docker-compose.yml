@@ -19,6 +19,11 @@ services:
       API_KEY: ${API_KEY:-}
       VEHICLE_ALIASES: ${VEHICLE_ALIASES:-}
       WAKE_TIMEOUT_SECONDS: ${WAKE_TIMEOUT_SECONDS:-30}
+      PRICE_COMMAND: ${PRICE_COMMAND:-1.4}
+      PRICE_DATA: ${PRICE_DATA:-2.7}
+      PRICE_WAKE: ${PRICE_WAKE:-25}
+      PRICE_CURRENCY: ${PRICE_CURRENCY:-₩}
+      MONTHLY_CREDIT: ${MONTHLY_CREDIT:-14020}
       # TESLA_SCOPES: "openid offline_access vehicle_device_data ..."
     volumes:
       # 키/토큰 영구 저장 (시놀로지 경로 예: /volume1/docker/tesla-fleet-api/data)
