@@ -458,28 +458,43 @@ curl -H "X-API-Key: <API_KEY>" https://<내도메인>/api/vehicles
 ## S3XY Buttons 기능 정리 (`/s3xydocument`)
 
 [Enhance Auto](https://www.enhauto.com/pages/buttons-functions) 의 S3XY Buttons 가
-차종·연식별로 지원하는 기능을 정리해 두는 참고 문서입니다. **이 서버의 Fleet API 기능과는
+차종·연식별로 지원하는 기능을 한국어로 정리한 참고 문서입니다. **이 서버의 Fleet API 기능과는
 무관**하며, 차 안에서 무엇을 버튼에 걸 수 있는지 찾아보기 위한 용도입니다.
 
-내용은 `src/s3xy.js` 에 있습니다. 원본 페이지가 차종·연식을 해시로 골라 자바스크립트로
-목록을 그리기 때문에 자동으로 가져올 수 없어, 직접 옮겨 적는 구조로 두었습니다.
+수록 차종은 **Model 3 (2018–2020)** 과 **Model X (2021+ Plaid/LR)** 두 가지입니다.
+기능 목록과 순서는 두 차종이 완전히 같고 **지원 여부만 다릅니다**. 전체 23개 분류 173개 기능 중
+Model 3 는 140개, Model X 는 142개를 지원합니다.
+
+페이지 위쪽에서 차종을 고르면 지원 여부(✓/✗)와 차종별 조건이 그 자리에서 바뀝니다.
+검색창으로 기능을 찾을 수 있고, "지원되는 기능만 보기" 를 켜면 미지원 항목이 숨겨집니다.
+
+내용은 `src/s3xy.js` 에 있습니다. 원본 페이지는 차종·연식을 고른 뒤에야 지원 여부를 보여 주고
+목록을 자바스크립트로 그리기 때문에 자동으로 가져올 수 없어, 두 차종의 페이지를 PDF 로 받아
+표를 그대로 옮겨 적었습니다.
 
 ```js
-{
-  id: 'model3-2018-2020',
-  name: 'Model 3',
-  year: '2018–2020',
-  source: 'https://www.enhauto.com/pages/buttons-functions#model=model3&&year=2018-2020',
-  categories: [
-    {
-      title: '공조',
-      functions: [
-        { name: 'Seat Heater', ko: '시트 열선 단계 조절', note: '앞좌석만' },
-      ],
-    },
-  ],
-}
+export const VEHICLES = [
+  { id: 'model3-2018-2020', name: 'Model 3', year: '2018–2020', source: '...' },
+  { id: 'modelx-2021-plaid-lr', name: 'Model X', year: '2021+ Plaid / Long Range', source: '...' },
+];
+
+export const CATEGORIES = [
+  {
+    title: '시트 열선 (Heated Seats)',
+    desc: '분류 전체에 붙는 설명 (선택)',
+    vehicles: { [M3]: '분류 전체에 붙는 차종별 안내 (선택)' },
+    functions: [
+      {
+        name: 'Toggle Front Left',          // 원문 기능 이름
+        ko: '앞 좌측 전환',                   // 한국어 이름
+        desc: '한국어 설명 (선택)',
+        vehicles: { [MX]: 'Gen2 커맨더 필요' }, // 차종별 추가 조건 (선택)
+        support: { [M3]: true, [MX]: true },  // 차종별 지원 여부
+      },
+    ],
+  },
+];
 ```
 
-`categories` 가 비어 있으면 페이지에 "내용이 입력되지 않았습니다" 안내와 원본 링크가 표시됩니다.
-차종을 추가하려면 `S3XY_VEHICLES` 에 항목을 하나 더 넣으면 됩니다.
+차종을 추가하려면 `VEHICLES` 에 항목을 하나 더 넣고, 각 기능의 `support` 에 그 차종의
+지원 여부를 채우면 됩니다. `supportedCount(vehicleId)` 로 차종별 지원 기능 수를 셀 수 있습니다.
