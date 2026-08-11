@@ -5,6 +5,7 @@ import { config, assertConfigured, redirectUri } from './config.js';
 import { ensureApiKey, getApiKey, requireApiKey } from './auth.js';
 import { COMMON_COMMANDS, proxyReady, sendCommand } from './commands.js';
 import { renderDocument } from './document.js';
+import { renderS3xyDocument } from './s3xyDocument.js';
 import {
   authorizeUrl as ownerAuthorizeUrl,
   exchangeCode as ownerExchangeCode,
@@ -99,7 +100,7 @@ table.usage tr.total td{border-top:1px solid #ccc}
   <li><a href="/auth/login">Tesla 계정 로그인</a> — 사용자 토큰 발급</li>
   <li><a href="/api/vehicles">차량 목록 조회</a></li>
 </ol>
-<p><a href="/control"><strong>차량 제어 페이지 →</strong></a> &nbsp; <a href="/document"><strong>API 문서 →</strong></a><br>
+<p><a href="/control"><strong>차량 제어 페이지 →</strong></a> &nbsp; <a href="/document"><strong>API 문서 →</strong></a> &nbsp; <a href="/s3xydocument">S3XY Buttons 기능 →</a><br>
 휴대폰에서 북마크해 두면 버튼으로 문 열기·공조를 바로 실행할 수 있습니다.</p>
 <h2>차량 명령</h2>
 <p>명령을 보내려면 차량에 <strong>가상 키</strong>가 등록되어 있어야 합니다.
@@ -457,6 +458,11 @@ app.post('/api/vehicles/:id/wake_up', async (req, res) => {
 // ---------- API 문서 ----------
 app.get('/document', (_req, res) => {
   res.type('html').send(renderDocument());
+});
+
+// S3XY Buttons 기능 정리 (참고 문서 — 이 서버 기능과는 별개)
+app.get('/s3xydocument', (_req, res) => {
+  res.type('html').send(renderS3xyDocument());
 });
 
 // ---------- 제어 페이지 ----------

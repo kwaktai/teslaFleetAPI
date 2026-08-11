@@ -140,6 +140,7 @@ curl https://<내도메인>/api/vehicles/<id>/vehicle_data
 | GET | `/control` | 차량 제어 페이지 (버튼) |
 | GET | `/document` | API 문서 (전체 명령 목록) |
 | GET | `/owner` | Owner API 연결 (조회·깨우기 비용 절감) |
+| GET | `/s3xydocument` | S3XY Buttons 기능 정리 (참고 문서) |
 | GET | `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Tesla 검증용 공개키 |
 | GET | `/auth/login` | Tesla OAuth 로그인 시작 |
 | GET | `/auth/callback` | OAuth 콜백 (Tesla가 호출) |
@@ -453,3 +454,32 @@ curl -H "X-API-Key: <API_KEY>" https://<내도메인>/api/vehicles
 | 502 Bad Gateway | 역방향 프록시의 대상 포트와 `.env` 의 `HOST_PORT` 불일치 → 두 값을 동일하게 |
 | `unknown shorthand flag: 'd'` | 구버전 Docker 패키지 → `docker compose` 대신 `docker-compose` 사용 |
 | `Bind mount failed: ... /data does not exist` | 프로젝트 폴더에서 `mkdir -p data` 실행 후 다시 기동 |
+
+## S3XY Buttons 기능 정리 (`/s3xydocument`)
+
+[Enhance Auto](https://www.enhauto.com/pages/buttons-functions) 의 S3XY Buttons 가
+차종·연식별로 지원하는 기능을 정리해 두는 참고 문서입니다. **이 서버의 Fleet API 기능과는
+무관**하며, 차 안에서 무엇을 버튼에 걸 수 있는지 찾아보기 위한 용도입니다.
+
+내용은 `src/s3xy.js` 에 있습니다. 원본 페이지가 차종·연식을 해시로 골라 자바스크립트로
+목록을 그리기 때문에 자동으로 가져올 수 없어, 직접 옮겨 적는 구조로 두었습니다.
+
+```js
+{
+  id: 'model3-2018-2020',
+  name: 'Model 3',
+  year: '2018–2020',
+  source: 'https://www.enhauto.com/pages/buttons-functions#model=model3&&year=2018-2020',
+  categories: [
+    {
+      title: '공조',
+      functions: [
+        { name: 'Seat Heater', ko: '시트 열선 단계 조절', note: '앞좌석만' },
+      ],
+    },
+  ],
+}
+```
+
+`categories` 가 비어 있으면 페이지에 "내용이 입력되지 않았습니다" 안내와 원본 링크가 표시됩니다.
+차종을 추가하려면 `S3XY_VEHICLES` 에 항목을 하나 더 넣으면 됩니다.
