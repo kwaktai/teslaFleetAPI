@@ -6,6 +6,7 @@ import { ensureApiKey, getApiKey, requireApiKey } from './auth.js';
 import { COMMON_COMMANDS, proxyReady, sendCommand } from './commands.js';
 import { renderDocument } from './document.js';
 import { renderS3xyDocument } from './s3xyDocument.js';
+import { renderSpeedcam, loadCameraDb } from './speedcam.js';
 import {
   authorizeUrl as ownerAuthorizeUrl,
   exchangeCode as ownerExchangeCode,
@@ -100,7 +101,7 @@ table.usage tr.total td{border-top:1px solid #ccc}
   <li><a href="/auth/login">Tesla 계정 로그인</a> — 사용자 토큰 발급</li>
   <li><a href="/api/vehicles">차량 목록 조회</a></li>
 </ol>
-<p><a href="/control"><strong>차량 제어 페이지 →</strong></a> &nbsp; <a href="/document"><strong>API 문서 →</strong></a> &nbsp; <a href="/s3xydocument">S3XY Buttons 기능 →</a><br>
+<p><a href="/control"><strong>차량 제어 페이지 →</strong></a> &nbsp; <a href="/document"><strong>API 문서 →</strong></a> &nbsp; <a href="/s3xydocument">S3XY Buttons 기능 →</a> &nbsp; <a href="/speedcam">과속카메라 경고 →</a><br>
 휴대폰에서 북마크해 두면 버튼으로 문 열기·공조를 바로 실행할 수 있습니다.</p>
 <h2>차량 명령</h2>
 <p>명령을 보내려면 차량에 <strong>가상 키</strong>가 등록되어 있어야 합니다.
@@ -463,6 +464,16 @@ app.get('/document', (_req, res) => {
 // S3XY Buttons 기능 정리 (참고 문서 — 이 서버 기능과는 별개)
 app.get('/s3xydocument', (_req, res) => {
   res.type('html').send(renderS3xyDocument());
+});
+
+// ---------- 과속카메라 경고 ----------
+// 브라우저가 GPS 로 직접 판정하므로 서버는 페이지와 DB 만 내려 줍니다.
+app.get('/speedcam', (_req, res) => {
+  res.type('html').send(renderSpeedcam());
+});
+
+app.get('/api/speedcam/db', (_req, res) => {
+  res.json(loadCameraDb());
 });
 
 // ---------- 제어 페이지 ----------

@@ -141,6 +141,8 @@ curl https://<내도메인>/api/vehicles/<id>/vehicle_data
 | GET | `/document` | API 문서 (전체 명령 목록) |
 | GET | `/owner` | Owner API 연결 (조회·깨우기 비용 절감) |
 | GET | `/s3xydocument` | S3XY Buttons 기능 정리 (참고 문서) |
+| GET | `/speedcam` | 과속카메라 경고 페이지 (휴대폰 GPS) |
+| GET | `/api/speedcam/db` | 과속카메라 좌표 DB (JSON) |
 | GET | `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Tesla 검증용 공개키 |
 | GET | `/auth/login` | Tesla OAuth 로그인 시작 |
 | GET | `/auth/callback` | OAuth 콜백 (Tesla가 호출) |
@@ -498,3 +500,35 @@ export const CATEGORIES = [
 
 차종을 추가하려면 `VEHICLES` 에 항목을 하나 더 넣고, 각 기능의 `support` 에 그 차종의
 지원 여부를 채우면 됩니다. `supportedCount(vehicleId)` 로 차종별 지원 기능 수를 셀 수 있습니다.
+
+## 과속카메라 경고 (`/speedcam`)
+
+휴대폰을 차에 거치하고 브라우저로 여는 과속카메라 경고 화면입니다. 안드로이드·아이폰
+모두 동작하며 앱 설치가 필요 없습니다. **Tesla API 와 무관**하게 휴대폰 GPS 만 씁니다.
+
+- 현재 속도를 크게 표시하고, 전방 700m 이내 · 진행 방향 ±45° 의 카메라를 검사합니다.
+- **제한속도 +9 km/h 이상일 때만** 차임(띵 띵 띵)이 울립니다. 음성 안내는 없습니다.
+  같은 카메라는 10초에 한 번만 다시 울립니다.
+- 판정은 전부 브라우저 안에서 돌고 카메라 DB 도 기기에 캐시되므로, 주행 중
+  서버·인터넷이 끊겨도 계속 동작합니다. 화면 꺼짐도 자동으로 막습니다.
+- 처음 열면 **시작** 버튼을 눌러야 합니다 (브라우저가 소리·위치 권한을 요구하기 때문).
+- `?demo=1` 을 붙이면 GPS 없이 가짜 주행으로 경고 동작을 확인할 수 있습니다.
+
+### 카메라 데이터 반입
+
+서버에는 테스트용 샘플 6개만 들어 있습니다. 실제 데이터는 경찰청 공공데이터로 채웁니다.
+
+1. [공공데이터포털](https://www.data.go.kr)에서 **"전국 무인교통단속카메라 표준데이터"** 를
+   검색해 CSV 를 내려받습니다 (무료, 로그인만 필요).
+2. CSV 를 NAS 의 프로젝트 폴더에 올린 뒤:
+
+   ```bash
+   node scripts/import-speedcam.js 내려받은파일.csv data/speedcam.json
+   ```
+
+   인코딩(EUC-KR/UTF-8)은 자동 인식하고, 제한속도가 있는 카메라만 추려 담습니다.
+   신호 전용 카메라와 좌표 오류 행은 제외됩니다.
+3. 서버 재시작 없이 페이지 새로고침만 하면 반영됩니다.
+
+참고: GPS 속도는 실제 속도에 가깝고 차량 계기판은 그보다 약간 높게 표시되므로,
+계기판 기준으로는 경고가 조금 더 일찍 울리는 셈입니다.
