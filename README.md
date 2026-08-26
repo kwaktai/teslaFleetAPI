@@ -190,14 +190,14 @@ https://tesla.com/_ak/<내도메인>
 | 방식 | 예 |
 |---|---|
 | **별칭** (`.env` 에서 정의) | `3`, `X` |
-| 차량 이름 (Tesla 앱에서 정한 이름) | `Kana`, `Xp` |
-| 차량 ID | `1492931239318942` |
-| VIN | `5YJ3E1EB8LF727066` |
+| 차량 이름 (Tesla 앱에서 정한 이름) | `내차`, `세컨드` |
+| 차량 ID | `1234567890123456` |
+| VIN | `5YJ3E1EA7HF000001` |
 
 별칭은 `.env` 에 `이름=VIN` 을 쉼표로 나열해 정의합니다.
 
 ```
-VEHICLE_ALIASES=3=5YJ3E1EB8LF727066,X=7SAXCBE66TF488989
+VEHICLE_ALIASES=3=5YJ3E1EA7HF000001,X=7SAXCBE67NF000001
 ```
 
 ```sh

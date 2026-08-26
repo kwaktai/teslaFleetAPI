@@ -97,9 +97,9 @@ ${COMMAND_COUNT}개입니다.</p>
 <table>
   <tr><th>방식</th><th>예</th></tr>
   <tr><td>별칭 (<code>.env</code> 의 <code>VEHICLE_ALIASES</code>)</td><td>${aliasRow}</td></tr>
-  <tr><td>차량 이름 (Tesla 앱에서 정한 이름)</td><td><code>Kana</code></td></tr>
-  <tr><td>차량 ID</td><td><code>1492931239318942</code></td></tr>
-  <tr><td>VIN</td><td><code>5YJ3E1EB8LF727066</code></td></tr>
+  <tr><td>차량 이름 (Tesla 앱에서 정한 이름)</td><td><code>내차</code></td></tr>
+  <tr><td>차량 ID</td><td><code>1234567890123456</code></td></tr>
+  <tr><td>VIN</td><td><code>5YJ3E1EA7HF000001</code></td></tr>
 </table>
 
 <h2>3. 엔드포인트</h2>

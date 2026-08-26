@@ -8,7 +8,7 @@
 # 예시:
 #   ./scripts/cmd.sh 3 wake                       # 깨우기
 #   ./scripts/cmd.sh 3 door_unlock                # 문 열기
-#   ./scripts/cmd.sh Kana door_lock               # 차량 이름으로도 가능
+#   ./scripts/cmd.sh 내차 door_lock               # 차량 이름으로도 가능
 #   ./scripts/cmd.sh X set_charge_limit '{"percent":80}'
 set -eu
 
