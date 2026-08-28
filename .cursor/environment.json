@@ -1,0 +1,17 @@
+{
+  "name": "Tesla Fleet API",
+  "install": "npm install",
+  "terminals": [
+    {
+      "name": "server",
+      "command": "DATA_DIR=./data PORT=8080 node src/index.js",
+      "description": "Tesla Fleet API Express server (http://localhost:8080). Runs without Tesla credentials; the status page reports missing config until TESLA_CLIENT_ID/SECRET/DOMAIN are set."
+    }
+  ],
+  "ports": [
+    {
+      "name": "web",
+      "port": 8080
+    }
+  ]
+}
