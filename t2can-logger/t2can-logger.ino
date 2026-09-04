@@ -75,6 +75,8 @@ bool httpBound = false;
 bool canAOk = false;
 bool canBOk = false;
 bool pushAuto = false;
+bool wantSta = false;
+bool staAnnounced = false;
 WifiKind wifiKind = WIFI_KIND_AP;
 String staSsid;
 String staPass;
@@ -113,19 +115,23 @@ void loadWifiPrefs() {
   prefs.end();
 
   if (mode == "sta" && staSsid.length()) {
-    wifiKind = WIFI_KIND_STA;
+    wantSta = true;
+    wifiKind = WIFI_KIND_AP;
     return;
   }
   if (mode == "ap") {
+    wantSta = false;
     wifiKind = WIFI_KIND_AP;
     return;
   }
   if (strlen(WIFI_PASS_DEFAULT) > 0) {
     staSsid = WIFI_SSID_DEFAULT;
     staPass = WIFI_PASS_DEFAULT;
-    wifiKind = WIFI_KIND_STA;
+    wantSta = true;
+    wifiKind = WIFI_KIND_AP;
     return;
   }
+  wantSta = false;
   wifiKind = WIFI_KIND_AP;
 }
 
@@ -316,40 +322,33 @@ void startWifiAp() {
   WiFi.mode(WIFI_AP);
   WiFi.softAP(kApSsid, kApPass);
   wifiKind = WIFI_KIND_AP;
+  staAnnounced = false;
   bindHttp();
   Serial.printf("Wi-Fi AP %s  /  %s\n", kApSsid, kApPass);
   Serial.printf("download  http://%s/log.csv\n",
                 WiFi.softAPIP().toString().c_str());
 }
 
-bool startWifiSta() {
+void beginStaJoin() {
   if (!staSsid.length()) {
-    return false;
+    return;
   }
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
   WiFi.begin(staSsid.c_str(), staPass.c_str());
-  Serial.printf("Wi-Fi STA joining %s (2.4GHz only) ...\n", staSsid.c_str());
-  const uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
-    delay(250);
-    Serial.print('.');
+  Serial.printf("STA joining %s (keeps retrying) ...\n", staSsid.c_str());
+}
+
+void announceSta() {
+  if (staAnnounced) {
+    return;
   }
-  Serial.println();
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("STA fail. ESP32 is 2.4GHz-only. Try WIFI SCAN, then JOIN a 2.4G SSID.");
-    WiFi.disconnect(true);
-    return false;
-  }
+  staAnnounced = true;
   wifiKind = WIFI_KIND_STA;
-  bindHttp();
   if (MDNS.begin("t2can")) {
     MDNS.addService("http", "tcp", 80);
     Serial.println("mDNS  http://t2can.local/log.csv");
   }
   Serial.printf("STA OK  http://%s/log.csv\n",
                 WiFi.localIP().toString().c_str());
-  return true;
 }
 
 void startWifi() {
@@ -357,7 +356,18 @@ void startWifi() {
   MDNS.end();
   WiFi.softAPdisconnect(true);
   WiFi.disconnect(true);
-  if (wifiKind == WIFI_KIND_STA && startWifiSta()) {
+  WiFi.persistent(false);
+  staAnnounced = false;
+  if (wantSta && staSsid.length()) {
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP(kApSsid, kApPass);
+    wifiKind = WIFI_KIND_AP;
+    bindHttp();
+    Serial.printf("Wi-Fi AP %s  /  %s\n", kApSsid, kApPass);
+    Serial.printf("download  http://%s/log.csv\n",
+                  WiFi.softAPIP().toString().c_str());
+    beginStaJoin();
+    lastWifiCheck = millis();
     return;
   }
   startWifiAp();
@@ -405,7 +415,8 @@ void wifiJoin(const String &ssid, const String &pass) {
   }
   staSsid = ssid;
   staPass = pass;
-  wifiKind = WIFI_KIND_STA;
+  wantSta = true;
+  wifiKind = WIFI_KIND_AP;
   wifiOn = true;
   saveWifiPrefs("sta", staSsid, staPass);
   startWifi();
@@ -573,6 +584,7 @@ void handleSerial() {
     stopWifi();
   } else if (cmd == "WIFI AP") {
     wifiOn = true;
+    wantSta = false;
     wifiKind = WIFI_KIND_AP;
     saveWifiPrefs("ap", staSsid, staPass);
     startWifi();
@@ -710,11 +722,21 @@ void loop() {
     flushLog();
     rotateIfNeeded();
   }
-  if (wifiOn && wifiKind == WIFI_KIND_STA &&
-      WiFi.status() != WL_CONNECTED && now - lastWifiCheck >= 10000) {
-    lastWifiCheck = now;
-    Serial.println("STA reconnect...");
-    WiFi.reconnect();
+  if (wifiOn && wantSta && staSsid.length()) {
+    if (WiFi.status() == WL_CONNECTED) {
+      announceSta();
+    } else {
+      if (staAnnounced) {
+        staAnnounced = false;
+        wifiKind = WIFI_KIND_AP;
+        MDNS.end();
+        Serial.println("STA lost — AP stays up, retrying car Wi-Fi");
+      }
+      if (now - lastWifiCheck >= 30000) {
+        lastWifiCheck = now;
+        beginStaJoin();
+      }
+    }
   }
   if (pushAuto && wifiKind == WIFI_KIND_STA &&
       WiFi.status() == WL_CONNECTED && now - lastPushMs >= kPushEveryMs) {
