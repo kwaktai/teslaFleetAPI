@@ -6,17 +6,32 @@
  *
  * 나중에 PC/폰에서 꺼내는 방법:
  *   1) USB 시리얼 — 아래 명령 또는 pull_log.py
- *   2) 폰/노트북을 Wi-Fi AP 에 연결 — http://192.168.4.1/log.csv
+ *   2) 차 Wi-Fi(STA) 또는 보드 AP — 브라우저에서 /log.csv
  *
- * 시리얼 115200, 명령: HELP  STAT  DUMP  CLEAR  ECHO ON|OFF  WIFI ON|OFF
+ * 시리얼 115200, 명령:
+ *   HELP  STAT  DUMP  CLEAR  ECHO ON|OFF
+ *   WIFI ON|OFF  WIFI AP  WIFI JOIN <ssid> <pass>  WIFI SCAN
  */
 
 #include <SPI.h>
 #include <FFat.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ESPmDNS.h>
+#include <Preferences.h>
 #include "driver/twai.h"
 #include "mcp2518fd_can.h"
+
+// 차 안 Wi-Fi. ESP32-S3 는 2.4GHz 만 됩니다. 이름이 5G 여도 2.4GHz 가
+// 같은 SSID 로 나와야 붙습니다. 암호를 여기에 넣거나, 시리얼에서
+// WIFI JOIN 으로 저장하세요. 공개 저장소에는 암호를 올리지 마세요.
+#if __has_include("wifi_secrets.h")
+#include "wifi_secrets.h"
+#endif
+#ifndef WIFI_SSID_DEFAULT
+#define WIFI_SSID_DEFAULT "Raven_5G"
+#define WIFI_PASS_DEFAULT ""
+#endif
 
 #define MCP2518_CS 10
 #define MCP2518_SCLK 12
@@ -35,6 +50,9 @@ static const char *kApPass = "teslalog1";
 
 mcp2518fd CanA(MCP2518_CS);
 WebServer http(80);
+Preferences prefs;
+
+enum WifiKind { WIFI_KIND_AP, WIFI_KIND_STA };
 
 File logFile;
 uint8_t logSlot = 0;
@@ -45,12 +63,76 @@ uint32_t framesA = 0;
 uint32_t framesB = 0;
 uint32_t dropped = 0;
 uint32_t lastStatMs = 0;
+uint32_t lastWifiCheck = 0;
 bool echoSerial = false;
 bool wifiOn = true;
+bool httpBound = false;
 bool canAOk = false;
 bool canBOk = false;
+WifiKind wifiKind = WIFI_KIND_AP;
+String staSsid;
+String staPass;
+
+void handleRoot();
+void handleStat();
+void handleLog();
 
 static const char *activePath() { return logSlot ? kLog1 : kLog0; }
+
+String currentWifiIp() {
+  if (!wifiOn) {
+    return "-";
+  }
+  if (wifiKind == WIFI_KIND_STA && WiFi.status() == WL_CONNECTED) {
+    return WiFi.localIP().toString();
+  }
+  if (wifiKind == WIFI_KIND_AP) {
+    return WiFi.softAPIP().toString();
+  }
+  return "-";
+}
+
+void loadWifiPrefs() {
+  prefs.begin("t2can", true);
+  const String mode = prefs.getString("mode", "");
+  staSsid = prefs.getString("ssid", "");
+  staPass = prefs.getString("pass", "");
+  prefs.end();
+
+  if (mode == "sta" && staSsid.length()) {
+    wifiKind = WIFI_KIND_STA;
+    return;
+  }
+  if (mode == "ap") {
+    wifiKind = WIFI_KIND_AP;
+    return;
+  }
+  if (strlen(WIFI_PASS_DEFAULT) > 0) {
+    staSsid = WIFI_SSID_DEFAULT;
+    staPass = WIFI_PASS_DEFAULT;
+    wifiKind = WIFI_KIND_STA;
+    return;
+  }
+  wifiKind = WIFI_KIND_AP;
+}
+
+void saveWifiPrefs(const char *mode, const String &ssid, const String &pass) {
+  prefs.begin("t2can", false);
+  prefs.putString("mode", mode);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  prefs.end();
+}
+
+void bindHttp() {
+  if (!httpBound) {
+    http.on("/", handleRoot);
+    http.on("/stat", handleStat);
+    http.on("/log.csv", handleLog);
+    httpBound = true;
+  }
+  http.begin();
+}
 
 void flushLog() {
   if (!logFile || lineUsed == 0) {
@@ -144,6 +226,9 @@ void handleRoot() {
   html += framesB;
   html += F(" / dropped ");
   html += dropped;
+  html += F("</p><p>wifi ");
+  html += (wifiKind == WIFI_KIND_STA) ? F("STA ") : F("AP ");
+  html += currentWifiIp();
   html += F("</p><p><a href='/log.csv'>log.csv 다운로드</a></p>");
   html += F("<p><a href='/stat'>stat</a></p>");
   http.send(200, "text/html; charset=utf-8", html);
@@ -165,6 +250,12 @@ void handleStat() {
   s += activePath();
   s += " bytes=";
   s += logFile ? logFile.size() + lineUsed : 0;
+  s += " wifi=";
+  s += wifiOn ? ((wifiKind == WIFI_KIND_STA) ? "sta" : "ap") : "off";
+  s += " ip=";
+  s += currentWifiIp();
+  s += " ssid=";
+  s += (wifiKind == WIFI_KIND_STA) ? staSsid : kApSsid;
   s += "\n";
   http.send(200, "text/plain; charset=utf-8", s);
 }
@@ -199,28 +290,109 @@ void handleLog() {
   }
 }
 
-void startWifi() {
+void startWifiAp() {
   WiFi.persistent(false);
   WiFi.mode(WIFI_AP);
   WiFi.softAP(kApSsid, kApPass);
-  http.on("/", handleRoot);
-  http.on("/stat", handleStat);
-  http.on("/log.csv", handleLog);
-  http.begin();
+  wifiKind = WIFI_KIND_AP;
+  bindHttp();
   Serial.printf("Wi-Fi AP %s  /  %s\n", kApSsid, kApPass);
   Serial.printf("download  http://%s/log.csv\n",
                 WiFi.softAPIP().toString().c_str());
 }
 
+bool startWifiSta() {
+  if (!staSsid.length()) {
+    return false;
+  }
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(staSsid.c_str(), staPass.c_str());
+  Serial.printf("Wi-Fi STA joining %s (2.4GHz only) ...\n", staSsid.c_str());
+  const uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+    delay(250);
+    Serial.print('.');
+  }
+  Serial.println();
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("STA fail. ESP32 is 2.4GHz-only. Try WIFI SCAN, then JOIN a 2.4G SSID.");
+    WiFi.disconnect(true);
+    return false;
+  }
+  wifiKind = WIFI_KIND_STA;
+  bindHttp();
+  if (MDNS.begin("t2can")) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.println("mDNS  http://t2can.local/log.csv");
+  }
+  Serial.printf("STA OK  http://%s/log.csv\n",
+                WiFi.localIP().toString().c_str());
+  return true;
+}
+
+void startWifi() {
+  http.stop();
+  MDNS.end();
+  WiFi.softAPdisconnect(true);
+  WiFi.disconnect(true);
+  if (wifiKind == WIFI_KIND_STA && startWifiSta()) {
+    return;
+  }
+  startWifiAp();
+}
+
 void stopWifi() {
   http.stop();
+  MDNS.end();
   WiFi.softAPdisconnect(true);
+  WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   Serial.println("Wi-Fi OFF");
 }
 
+void wifiScan() {
+  Serial.println("scanning 2.4GHz ...");
+  const bool wasOn = wifiOn;
+  if (wasOn) {
+    http.stop();
+    MDNS.end();
+  }
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true);
+  delay(100);
+  const int n = WiFi.scanNetworks();
+  if (n <= 0) {
+    Serial.println("no 2.4GHz networks. If the car SSID is 5GHz-only, the board cannot join it.");
+  } else {
+    for (int i = 0; i < n; i++) {
+      Serial.printf("  %s  %ddBm\n", WiFi.SSID(i).c_str(), WiFi.RSSI(i));
+    }
+  }
+  WiFi.scanDelete();
+  if (wasOn) {
+    startWifi();
+  } else {
+    WiFi.mode(WIFI_OFF);
+  }
+}
+
+void wifiJoin(const String &ssid, const String &pass) {
+  if (!ssid.length()) {
+    Serial.println("WIFI JOIN <ssid> <password>");
+    return;
+  }
+  staSsid = ssid;
+  staPass = pass;
+  wifiKind = WIFI_KIND_STA;
+  wifiOn = true;
+  saveWifiPrefs("sta", staSsid, staPass);
+  startWifi();
+}
+
 void printHelp() {
-  Serial.println("HELP  STAT  DUMP  CLEAR  ECHO ON|OFF  WIFI ON|OFF");
+  Serial.println("HELP  STAT  DUMP  CLEAR  ECHO ON|OFF");
+  Serial.println("WIFI ON|OFF  WIFI AP  WIFI JOIN <ssid> <pass>  WIFI SCAN");
 }
 
 void printStat() {
@@ -229,6 +401,12 @@ void printStat() {
                 canBOk ? "ok" : "fail", static_cast<unsigned long>(framesB),
                 static_cast<unsigned long>(dropped), activePath(),
                 static_cast<unsigned>(logFile ? logFile.size() + lineUsed : 0));
+  Serial.printf("wifi=%s  ip=%s  ssid=%s\n",
+                wifiOn ? ((wifiKind == WIFI_KIND_STA) ? "sta" : "ap") : "off",
+                currentWifiIp().c_str(),
+                wifiOn ? ((wifiKind == WIFI_KIND_STA) ? staSsid.c_str()
+                                                     : kApSsid)
+                       : "-");
 }
 
 void streamFileToSerial(const char *path) {
@@ -272,12 +450,30 @@ void clearLogs() {
   Serial.println("logs cleared");
 }
 
+static String skipWord(const String &s) {
+  int i = 0;
+  while (i < s.length() && s[i] == ' ') {
+    i++;
+  }
+  while (i < s.length() && s[i] != ' ') {
+    i++;
+  }
+  while (i < s.length() && s[i] == ' ') {
+    i++;
+  }
+  return s.substring(i);
+}
+
 void handleSerial() {
   if (!Serial.available()) {
     return;
   }
-  String cmd = Serial.readStringUntil('\n');
-  cmd.trim();
+  String raw = Serial.readStringUntil('\n');
+  raw.trim();
+  if (!raw.length()) {
+    return;
+  }
+  String cmd = raw;
   cmd.toUpperCase();
   if (cmd == "HELP" || cmd == "?") {
     printHelp();
@@ -294,16 +490,27 @@ void handleSerial() {
     echoSerial = false;
     Serial.println("echo OFF");
   } else if (cmd == "WIFI ON") {
-    if (!wifiOn) {
-      wifiOn = true;
-      startWifi();
-    }
+    wifiOn = true;
+    startWifi();
   } else if (cmd == "WIFI OFF") {
-    if (wifiOn) {
-      wifiOn = false;
-      stopWifi();
+    wifiOn = false;
+    stopWifi();
+  } else if (cmd == "WIFI AP") {
+    wifiOn = true;
+    wifiKind = WIFI_KIND_AP;
+    saveWifiPrefs("ap", staSsid, staPass);
+    startWifi();
+  } else if (cmd == "WIFI SCAN") {
+    wifiScan();
+  } else if (cmd.startsWith("WIFI JOIN ")) {
+    String rest = skipWord(skipWord(raw));
+    const int sp = rest.indexOf(' ');
+    if (sp < 0) {
+      Serial.println("WIFI JOIN <ssid> <password>");
+    } else {
+      wifiJoin(rest.substring(0, sp), rest.substring(sp + 1));
     }
-  } else if (cmd.length()) {
+  } else {
     printHelp();
   }
 }
@@ -387,6 +594,7 @@ void setup() {
 
   canAOk = startCanA();
   canBOk = startCanB();
+  loadWifiPrefs();
   if (wifiOn) {
     startWifi();
   }
@@ -405,5 +613,11 @@ void loop() {
     lastStatMs = now;
     flushLog();
     rotateIfNeeded();
+  }
+  if (wifiOn && wifiKind == WIFI_KIND_STA &&
+      WiFi.status() != WL_CONNECTED && now - lastWifiCheck >= 10000) {
+    lastWifiCheck = now;
+    Serial.println("STA reconnect...");
+    WiFi.reconnect();
   }
 }

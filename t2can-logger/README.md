@@ -62,15 +62,36 @@ python pull_log.py --port COM5 --live
 
 Ctrl+C 로 멈춥니다.
 
-### 3) 폰/노트북 Wi-Fi 로 받기
+### 3) 차 안 Wi-Fi 로 받기
 
-보드가 AP 를 켭니다.
+보드(ESP32-S3)는 **2.4GHz 만** 됩니다. 이름이 `Raven_5G` 여도, 그 SSID 가 2.4GHz 로도 나와야 붙습니다. 5GHz 전용이면 연결이 안 됩니다.
 
-- SSID: `T2CAN-LOG`
-- 암호: `teslalog1`
-- 브라우저: http://192.168.4.1/log.csv
+**한 번만** 시리얼 모니터(115200)에서 차 Wi-Fi를 저장합니다. SSID·암호 대소문자는 그대로 씁니다.
 
-시리얼에서 `WIFI OFF` / `WIFI ON` 으로 끌 수 있습니다.
+```
+WIFI JOIN Raven_5G 여기에암호
+```
+
+붙으면 이런 줄이 나옵니다.
+
+```
+STA OK  http://192.168.x.x/log.csv
+mDNS  http://t2can.local/log.csv
+```
+
+폰/노트북도 **같은 차 Wi-Fi**에 연결한 뒤 그 주소로 엽니다. 이후 재부팅해도 보드가 같은 망에 다시 붙습니다.
+
+안 붙으면:
+
+1. `WIFI SCAN` — 보드가 보이는 **2.4GHz** 목록
+2. 목록에 있는 이름(예: `Raven`, `Raven_2.4G`)으로 다시 `WIFI JOIN`
+3. 그래도 안 되면 `WIFI AP` 로 보드가 만드는 망을 씁니다
+   - SSID: `T2CAN-LOG` / 암호: `teslalog1`
+   - http://192.168.4.1/log.csv
+
+스케치 맨 위 `WIFI_PASS_DEFAULT` 에 암호를 넣고 업로드해도 됩니다. **공개 GitHub에는 암호를 올리지 마세요.**
+
+`WIFI OFF` / `WIFI ON` / `STAT`(할당된 IP 확인) 도 됩니다.
 
 ## CSV 보기
 
