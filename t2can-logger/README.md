@@ -101,8 +101,10 @@ T-2CAN(ESP32-S3)에는 **공식 Tailscale을 설치할 수 없습니다.** Ardui
 
 원격으로 편히 보려면 아래 중 하나를 씁니다.
 
-**A. 시놀로지 Tesla Fleet API 서버로 로그 올리기 (추천)**  
-차 Wi-Fi에 인터넷만 되면, 보드가 NAS로 CSV를 밀어 올립니다. 폰/PC에서 이미 쓰는 주소로 엽니다.
+**A. 시놀로지에 날짜별 파일로 모은 뒤 일괄 업로드 (추천)**  
+
+CAN 은 초당 수백 줄이라 구글 시트에 바로 넣으면 셀이 금방 차고 느려집니다.  
+보드는 플래시에 잠깐 쌓고, 차 Wi-Fi가 있을 때 **새로 생긴 구간만** NAS 로 올립니다. NAS 의 `YYYY-MM-DD.csv` 가 DB 입니다 (최대 60일).
 
 ```
 PUSH URL https://<내도메인>/api/canlog
@@ -111,8 +113,50 @@ PUSH NOW
 PUSH AUTO ON
 ```
 
-브라우저: `https://<내도메인>/canlog`  
-`PUSH AUTO ON` 은 10분마다 올립니다. 올리는 동안은 CAN 기록이 잠시 끊길 수 있어, 주행 중 전체 기록이 필요하면 USB `--live` 를 쓰세요.
+브라우저: `https://<내도메인>/canlog` — 날짜별 다운로드  
+`PUSH AUTO ON` 은 1분마다 최대 약 192KB 씩 이어서 올립니다. 이미 보낸 부분은 다시 안 보냅니다.
+
+#### 시놀로지에서 할 일
+
+새 포트나 새 역방향 프록시는 **필요 없습니다.** 이미 Tesla Fleet API 용으로 열어 둔 `https://<내도메인>` 이 `/canlog` 도 받습니다.
+
+1. 시놀로지 SSH 또는 File Station에서 서버 폴더를 이 브랜치 내용으로 맞춥니다.  
+   예: `/volume1/docker/tesla-fleet-api`
+2. Container Manager에서 해당 프로젝트를 **다시 빌드** 하거나 SSH에서:
+
+```sh
+cd /volume1/docker/tesla-fleet-api
+sudo docker-compose up -d --build
+```
+
+3. API 키를 확인합니다.
+
+```sh
+sudo docker exec tesla-fleet-api cat /data/api-key.txt
+```
+
+`.env` 에 `API_KEY` 를 넣어 두었다면 그 값입니다.
+
+4. 집 밖에서(LTE) 브라우저로 한 번 엽니다.
+
+```
+https://<내도메인>/?key=<API_KEY>
+https://<내도메인>/canlog
+```
+
+첫 주소는 쿠키를 심습니다. 그다음 `/canlog` 에 “아직 없습니다”가 보이면 서버는 준비된 겁니다.
+
+5. 보드 시리얼(차 Wi-Fi에 붙은 상태)에서:
+
+```
+PUSH URL https://<내도메인>/api/canlog
+PUSH KEY <방금 확인한 API_KEY>
+PUSH AUTO ON
+```
+
+로그 파일은 NAS의 `docker/tesla-fleet-api/data/canlog/` 아래 날짜별 CSV로 쌓입니다. File Station에서도 볼 수 있습니다.
+
+차 공유기(`Raven_5G`)에 **인터넷**이 있어야 보드가 집 NAS에 닿습니다. 로컬 `http://192.168.104.189/log.csv` 는 같은 Wi-Fi에서만 됩니다.
 
 시놀로지에 Tailscale을 켜 두면 NAS 화면을 더 편하게 열 수 있습니다. 로그 자체는 원래 HTTPS 로 열려 있습니다.
 

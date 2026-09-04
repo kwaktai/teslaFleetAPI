@@ -19,7 +19,7 @@ import { clearOwnerTokens, ownerLinked, saveOwnerTokens } from './ownerStore.js'
 import { readVehicleData, readVehicleList, requestWake } from './reads.js';
 import { clearUsage, monthKey, snapshot } from './usage.js';
 import { aliasEntries, resolveVehicle } from './vehicles.js';
-import { readLatest, readMeta, renderCanlogPage, saveCanlog } from './canlog.js';
+import { readDay, readLatest, renderCanlogPage, saveCanlog } from './canlog.js';
 import { ensureKeys, publicKeyPath } from './keys.js';
 import { loadTokens, clearTokens } from './tokenStore.js';
 import {
@@ -483,16 +483,14 @@ app.get('/canlog', (_req, res) => {
   res.type('html').send(renderCanlogPage());
 });
 
-app.get('/api/canlog', (_req, res) => {
-  const csv = readLatest();
+app.get('/api/canlog', (req, res) => {
+  const day = typeof req.query.day === 'string' ? req.query.day : '';
+  const csv = day ? readDay(day) : readLatest();
   if (!csv) {
     return res.status(404).type('text/plain; charset=utf-8').send('아직 업로드된 로그가 없습니다.');
   }
-  const meta = readMeta();
-  if (meta?.updatedAt) {
-    res.set('Last-Modified', new Date(meta.updatedAt).toUTCString());
-  }
-  res.set('Content-Disposition', 'attachment; filename="canlog.csv"');
+  const name = day ? `canlog-${day}.csv` : 'canlog.csv';
+  res.set('Content-Disposition', `attachment; filename="${name}"`);
   res.type('text/csv; charset=utf-8').send(csv);
 });
 
@@ -504,8 +502,7 @@ app.post(
     if (!body.trim()) {
       return res.status(400).json({ error: 'empty log' });
     }
-    const append = req.get('X-T2CAN-Append') === '1';
-    const meta = saveCanlog(body, { append });
+    const meta = saveCanlog(body);
     res.json({ ok: true, ...meta });
   }
 );

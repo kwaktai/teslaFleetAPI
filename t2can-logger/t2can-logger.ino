@@ -69,6 +69,8 @@ uint32_t dropped = 0;
 uint32_t lastStatMs = 0;
 uint32_t lastWifiCheck = 0;
 uint32_t lastPushMs = 0;
+uint32_t sentOff = 0;
+uint8_t sentSlot = 0;
 bool echoSerial = false;
 bool wifiOn = true;
 bool httpBound = false;
@@ -83,7 +85,9 @@ String staPass;
 String pushUrl;
 String pushKey;
 
-static const uint32_t kPushEveryMs = 10UL * 60UL * 1000UL;
+static const uint32_t kPushEveryMs = 60UL * 1000UL;
+static const size_t kPushChunk = 48UL * 1024UL;
+static const int kPushChunks = 4;
 
 void handleRoot();
 void handleStat();
@@ -112,6 +116,8 @@ void loadWifiPrefs() {
   pushUrl = prefs.getString("pushUrl", "");
   pushKey = prefs.getString("pushKey", "");
   pushAuto = prefs.getBool("pushAuto", false);
+  sentOff = prefs.getUInt("sentOff", 0);
+  sentSlot = static_cast<uint8_t>(prefs.getUChar("sentSlot", 0));
   prefs.end();
 
   if (mode == "sta" && staSsid.length()) {
@@ -148,6 +154,8 @@ void savePushPrefs() {
   prefs.putString("pushUrl", pushUrl);
   prefs.putString("pushKey", pushKey);
   prefs.putBool("pushAuto", pushAuto);
+  prefs.putUInt("sentOff", sentOff);
+  prefs.putUChar("sentSlot", sentSlot);
   prefs.end();
 }
 
@@ -422,18 +430,23 @@ void wifiJoin(const String &ssid, const String &pass) {
   startWifi();
 }
 
-bool uploadOneFile(const char *path, bool append) {
+bool uploadRange(const char *path, uint32_t offset, size_t nbytes) {
   File f = FFat.open(path, FILE_READ);
-  if (!f || f.size() == 0) {
-    if (f) {
-      f.close();
-    }
-    return true;
+  if (!f) {
+    return false;
+  }
+  if (offset > f.size()) {
+    f.close();
+    return false;
+  }
+  if (!f.seek(offset)) {
+    f.close();
+    return false;
   }
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
-  http.setTimeout(180000);
+  http.setTimeout(60000);
   if (!http.begin(client, pushUrl)) {
     Serial.println("PUSH begin fail");
     f.close();
@@ -441,35 +454,79 @@ bool uploadOneFile(const char *path, bool append) {
   }
   http.addHeader("X-API-Key", pushKey);
   http.addHeader("Content-Type", "text/csv; charset=utf-8");
-  if (append) {
-    http.addHeader("X-T2CAN-Append", "1");
-  }
-  const int code = http.sendRequest("POST", &f, f.size());
+  const int code = http.sendRequest("POST", &f, nbytes);
   f.close();
   http.end();
-  Serial.printf("PUSH %s -> %d\n", path, code);
+  Serial.printf("PUSH %s +%u %uB -> %d\n", path,
+                static_cast<unsigned>(offset), static_cast<unsigned>(nbytes),
+                code);
   return code >= 200 && code < 300;
 }
 
-void pushLogs() {
+bool pushMore() {
   flushLog();
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("PUSH needs STA Wi-Fi");
-    return;
+    return false;
   }
   if (!pushUrl.length() || !pushKey.length()) {
     Serial.println("PUSH URL and PUSH KEY first");
-    return;
+    return false;
   }
-  Serial.println("PUSH start");
-  bool ok;
-  if (logSlot == 1) {
-    ok = uploadOneFile(kLog0, false) && uploadOneFile(kLog1, true);
-  } else {
-    ok = uploadOneFile(kLog1, false) && uploadOneFile(kLog0, true);
+
+  int chunks = 0;
+  while (chunks < kPushChunks) {
+    if (sentSlot != logSlot) {
+      const char *oldPath = sentSlot ? kLog1 : kLog0;
+      File oldf = FFat.open(oldPath, FILE_READ);
+      if (!oldf) {
+        sentSlot = logSlot;
+        sentOff = 0;
+        savePushPrefs();
+        continue;
+      }
+      const uint32_t sz = oldf.size();
+      oldf.close();
+      if (sentOff >= sz) {
+        sentSlot = logSlot;
+        sentOff = 0;
+        savePushPrefs();
+        continue;
+      }
+      const size_t n = (sz - sentOff) > kPushChunk ? kPushChunk : (sz - sentOff);
+      if (!uploadRange(oldPath, sentOff, n)) {
+        return false;
+      }
+      sentOff += n;
+      savePushPrefs();
+      chunks++;
+      continue;
+    }
+
+    if (!logFile) {
+      break;
+    }
+    const uint32_t sz = logFile.size();
+    if (sentOff > sz) {
+      sentOff = 0;
+    }
+    if (sentOff >= sz) {
+      break;
+    }
+    const size_t n = (sz - sentOff) > kPushChunk ? kPushChunk : (sz - sentOff);
+    if (!uploadRange(activePath(), sentOff, n)) {
+      return false;
+    }
+    sentOff += n;
+    savePushPrefs();
+    chunks++;
   }
-  Serial.println(ok ? "PUSH done" : "PUSH fail");
+  Serial.printf("PUSH caught up to %s @%u\n", activePath(),
+                static_cast<unsigned>(sentOff));
+  return true;
 }
+
+void pushLogs() { pushMore(); }
 
 void printHelp() {
   Serial.println("HELP  STAT  DUMP  CLEAR  ECHO ON|OFF");
@@ -613,7 +670,7 @@ void handleSerial() {
   } else if (cmd == "PUSH AUTO ON") {
     pushAuto = true;
     savePushPrefs();
-    Serial.println("push auto ON (10 min)");
+    Serial.println("push auto ON (1 min, incremental)");
   } else if (cmd == "PUSH AUTO OFF") {
     pushAuto = false;
     savePushPrefs();
