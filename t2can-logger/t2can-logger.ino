@@ -7,15 +7,19 @@
  * 나중에 PC/폰에서 꺼내는 방법:
  *   1) USB 시리얼 — 아래 명령 또는 pull_log.py
  *   2) 차 Wi-Fi(STA) 또는 보드 AP — 브라우저에서 /log.csv
+ *   3) 시놀로지 /api/canlog 로 PUSH (원격). Tailscale 은 보드가 아니라 NAS/공유기.
  *
  * 시리얼 115200, 명령:
  *   HELP  STAT  DUMP  CLEAR  ECHO ON|OFF
  *   WIFI ON|OFF  WIFI AP  WIFI JOIN <ssid> <pass>  WIFI SCAN
+ *   PUSH URL  PUSH KEY  PUSH NOW  PUSH AUTO ON|OFF
  */
 
 #include <SPI.h>
 #include <FFat.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
@@ -64,14 +68,20 @@ uint32_t framesB = 0;
 uint32_t dropped = 0;
 uint32_t lastStatMs = 0;
 uint32_t lastWifiCheck = 0;
+uint32_t lastPushMs = 0;
 bool echoSerial = false;
 bool wifiOn = true;
 bool httpBound = false;
 bool canAOk = false;
 bool canBOk = false;
+bool pushAuto = false;
 WifiKind wifiKind = WIFI_KIND_AP;
 String staSsid;
 String staPass;
+String pushUrl;
+String pushKey;
+
+static const uint32_t kPushEveryMs = 10UL * 60UL * 1000UL;
 
 void handleRoot();
 void handleStat();
@@ -97,6 +107,9 @@ void loadWifiPrefs() {
   const String mode = prefs.getString("mode", "");
   staSsid = prefs.getString("ssid", "");
   staPass = prefs.getString("pass", "");
+  pushUrl = prefs.getString("pushUrl", "");
+  pushKey = prefs.getString("pushKey", "");
+  pushAuto = prefs.getBool("pushAuto", false);
   prefs.end();
 
   if (mode == "sta" && staSsid.length()) {
@@ -121,6 +134,14 @@ void saveWifiPrefs(const char *mode, const String &ssid, const String &pass) {
   prefs.putString("mode", mode);
   prefs.putString("ssid", ssid);
   prefs.putString("pass", pass);
+  prefs.end();
+}
+
+void savePushPrefs() {
+  prefs.begin("t2can", false);
+  prefs.putString("pushUrl", pushUrl);
+  prefs.putString("pushKey", pushKey);
+  prefs.putBool("pushAuto", pushAuto);
   prefs.end();
 }
 
@@ -390,9 +411,60 @@ void wifiJoin(const String &ssid, const String &pass) {
   startWifi();
 }
 
+bool uploadOneFile(const char *path, bool append) {
+  File f = FFat.open(path, FILE_READ);
+  if (!f || f.size() == 0) {
+    if (f) {
+      f.close();
+    }
+    return true;
+  }
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setTimeout(180000);
+  if (!http.begin(client, pushUrl)) {
+    Serial.println("PUSH begin fail");
+    f.close();
+    return false;
+  }
+  http.addHeader("X-API-Key", pushKey);
+  http.addHeader("Content-Type", "text/csv; charset=utf-8");
+  if (append) {
+    http.addHeader("X-T2CAN-Append", "1");
+  }
+  const int code = http.sendRequest("POST", &f, f.size());
+  f.close();
+  http.end();
+  Serial.printf("PUSH %s -> %d\n", path, code);
+  return code >= 200 && code < 300;
+}
+
+void pushLogs() {
+  flushLog();
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("PUSH needs STA Wi-Fi");
+    return;
+  }
+  if (!pushUrl.length() || !pushKey.length()) {
+    Serial.println("PUSH URL and PUSH KEY first");
+    return;
+  }
+  Serial.println("PUSH start");
+  bool ok;
+  if (logSlot == 1) {
+    ok = uploadOneFile(kLog0, false) && uploadOneFile(kLog1, true);
+  } else {
+    ok = uploadOneFile(kLog1, false) && uploadOneFile(kLog0, true);
+  }
+  Serial.println(ok ? "PUSH done" : "PUSH fail");
+}
+
 void printHelp() {
   Serial.println("HELP  STAT  DUMP  CLEAR  ECHO ON|OFF");
   Serial.println("WIFI ON|OFF  WIFI AP  WIFI JOIN <ssid> <pass>  WIFI SCAN");
+  Serial.println("PUSH URL <https://.../api/canlog>  PUSH KEY <api-key>");
+  Serial.println("PUSH NOW  PUSH AUTO ON|OFF");
 }
 
 void printStat() {
@@ -407,6 +479,10 @@ void printStat() {
                 wifiOn ? ((wifiKind == WIFI_KIND_STA) ? staSsid.c_str()
                                                      : kApSsid)
                        : "-");
+  Serial.printf("push=%s  auto=%s  url=%s\n",
+                (pushUrl.length() && pushKey.length()) ? "set" : "off",
+                pushAuto ? "on" : "off",
+                pushUrl.length() ? pushUrl.c_str() : "-");
 }
 
 void streamFileToSerial(const char *path) {
@@ -510,6 +586,26 @@ void handleSerial() {
     } else {
       wifiJoin(rest.substring(0, sp), rest.substring(sp + 1));
     }
+  } else if (cmd.startsWith("PUSH URL ")) {
+    pushUrl = skipWord(skipWord(raw));
+    pushUrl.trim();
+    savePushPrefs();
+    Serial.printf("push url %s\n", pushUrl.c_str());
+  } else if (cmd.startsWith("PUSH KEY ")) {
+    pushKey = skipWord(skipWord(raw));
+    pushKey.trim();
+    savePushPrefs();
+    Serial.println("push key saved");
+  } else if (cmd == "PUSH NOW") {
+    pushLogs();
+  } else if (cmd == "PUSH AUTO ON") {
+    pushAuto = true;
+    savePushPrefs();
+    Serial.println("push auto ON (10 min)");
+  } else if (cmd == "PUSH AUTO OFF") {
+    pushAuto = false;
+    savePushPrefs();
+    Serial.println("push auto OFF");
   } else {
     printHelp();
   }
@@ -619,5 +715,10 @@ void loop() {
     lastWifiCheck = now;
     Serial.println("STA reconnect...");
     WiFi.reconnect();
+  }
+  if (pushAuto && wifiKind == WIFI_KIND_STA &&
+      WiFi.status() == WL_CONNECTED && now - lastPushMs >= kPushEveryMs) {
+    lastPushMs = now;
+    pushLogs();
   }
 }

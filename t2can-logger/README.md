@@ -93,6 +93,30 @@ mDNS  http://t2can.local/log.csv
 
 `WIFI OFF` / `WIFI ON` / `STAT`(할당된 IP 확인) 도 됩니다.
 
+### 4) 원격에서 보기 (Tailscale은 보드에 올리지 않습니다)
+
+T-2CAN(ESP32-S3)에는 **공식 Tailscale을 설치할 수 없습니다.** Arduino 스케치와 같이 쓰면 CAN 수신이 끊길 수 있습니다.
+
+원격으로 편히 보려면 아래 중 하나를 씁니다.
+
+**A. 시놀로지 Tesla Fleet API 서버로 로그 올리기 (추천)**  
+차 Wi-Fi에 인터넷만 되면, 보드가 NAS로 CSV를 밀어 올립니다. 폰/PC에서 이미 쓰는 주소로 엽니다.
+
+```
+PUSH URL https://<내도메인>/api/canlog
+PUSH KEY <시놀로지 API_KEY>
+PUSH NOW
+PUSH AUTO ON
+```
+
+브라우저: `https://<내도메인>/canlog`  
+`PUSH AUTO ON` 은 10분마다 올립니다. 올리는 동안은 CAN 기록이 잠시 끊길 수 있어, 주행 중 전체 기록이 필요하면 USB `--live` 를 쓰세요.
+
+시놀로지에 Tailscale을 켜 두면 NAS 화면을 더 편하게 열 수 있습니다. 로그 자체는 원래 HTTPS 로 열려 있습니다.
+
+**B. 차 공유기(Raven)에 Tailscale**  
+공유기가 GL.iNet / OpenWrt 처럼 Tailscale·서브넷 라우터를 지원하면, 공유기 LAN을 advertise 한 뒤 보드의 `STAT` IP 로 `http://192.168.x.x/log.csv` 를 엽니다. 보드에 VPN을 올리지 않습니다.
+
 ## CSV 보기
 
 ```

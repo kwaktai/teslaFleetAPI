@@ -19,6 +19,7 @@ import { clearOwnerTokens, ownerLinked, saveOwnerTokens } from './ownerStore.js'
 import { readVehicleData, readVehicleList, requestWake } from './reads.js';
 import { clearUsage, monthKey, snapshot } from './usage.js';
 import { aliasEntries, resolveVehicle } from './vehicles.js';
+import { readLatest, readMeta, renderCanlogPage, saveCanlog } from './canlog.js';
 import { ensureKeys, publicKeyPath } from './keys.js';
 import { loadTokens, clearTokens } from './tokenStore.js';
 import {
@@ -101,7 +102,7 @@ table.usage tr.total td{border-top:1px solid #ccc}
   <li><a href="/auth/login">Tesla 계정 로그인</a> — 사용자 토큰 발급</li>
   <li><a href="/api/vehicles">차량 목록 조회</a></li>
 </ol>
-<p><a href="/control"><strong>차량 제어 페이지 →</strong></a> &nbsp; <a href="/document"><strong>API 문서 →</strong></a> &nbsp; <a href="/s3xydocument">S3XY Buttons 기능 →</a> &nbsp; <a href="/speedcam">과속카메라 경고 →</a><br>
+<p><a href="/control"><strong>차량 제어 페이지 →</strong></a> &nbsp; <a href="/document"><strong>API 문서 →</strong></a> &nbsp; <a href="/s3xydocument">S3XY Buttons 기능 →</a> &nbsp; <a href="/speedcam">과속카메라 경고 →</a> &nbsp; <a href="/canlog">T-2CAN 로그 →</a><br>
 휴대폰에서 북마크해 두면 버튼으로 문 열기·공조를 바로 실행할 수 있습니다.</p>
 <h2>차량 명령</h2>
 <p>명령을 보내려면 차량에 <strong>가상 키</strong>가 등록되어 있어야 합니다.
@@ -475,6 +476,39 @@ app.get('/speedcam', (_req, res) => {
 app.get('/api/speedcam/db', (_req, res) => {
   res.json(loadCameraDb());
 });
+
+// T-2CAN FD 로거가 차 Wi-Fi 에서 밀어 올린 CSV. Tailscale 은 보드가 아니라
+// 이 NAS(또는 차 공유기)에 두고, 원격에서는 이 페이지를 엽니다.
+app.get('/canlog', (_req, res) => {
+  res.type('html').send(renderCanlogPage());
+});
+
+app.get('/api/canlog', (_req, res) => {
+  const csv = readLatest();
+  if (!csv) {
+    return res.status(404).type('text/plain; charset=utf-8').send('아직 업로드된 로그가 없습니다.');
+  }
+  const meta = readMeta();
+  if (meta?.updatedAt) {
+    res.set('Last-Modified', new Date(meta.updatedAt).toUTCString());
+  }
+  res.set('Content-Disposition', 'attachment; filename="canlog.csv"');
+  res.type('text/csv; charset=utf-8').send(csv);
+});
+
+app.post(
+  '/api/canlog',
+  express.text({ type: '*/*', limit: '8mb' }),
+  (req, res) => {
+    const body = typeof req.body === 'string' ? req.body : '';
+    if (!body.trim()) {
+      return res.status(400).json({ error: 'empty log' });
+    }
+    const append = req.get('X-T2CAN-Append') === '1';
+    const meta = saveCanlog(body, { append });
+    res.json({ ok: true, ...meta });
+  }
+);
 
 // ---------- 제어 페이지 ----------
 // 명령은 POST 전용이라 주소창으로는 호출할 수 없습니다. (브라우저·메신저가 링크를
