@@ -341,6 +341,12 @@ void beginStaJoin() {
   if (!staSsid.length()) {
     return;
   }
+  const int st = WiFi.status();
+  if (st == WL_CONNECTED || st == WL_IDLE_STATUS) {
+    return;
+  }
+  WiFi.disconnect(false);
+  delay(50);
   WiFi.begin(staSsid.c_str(), staPass.c_str());
   Serial.printf("STA joining %s (keeps retrying) ...\n", staSsid.c_str());
 }
@@ -430,6 +436,43 @@ void wifiJoin(const String &ssid, const String &pass) {
   startWifi();
 }
 
+static String urlHost(const String &url) {
+  int start = url.indexOf("://");
+  start = (start < 0) ? 0 : start + 3;
+  int end = url.indexOf('/', start);
+  if (end < 0) {
+    end = url.length();
+  }
+  return url.substring(start, end);
+}
+
+void printHttpCode(int code) {
+  Serial.printf("http %d", code);
+  if (code < 0) {
+    Serial.printf(" (%s)", HTTPClient::errorToString(code).c_str());
+  }
+  Serial.println();
+}
+
+int httpsPost(const String &body) {
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setHandshakeTimeout(20);
+  HTTPClient http;
+  http.setTimeout(20000);
+  http.setReuse(false);
+  if (!http.begin(client, pushUrl)) {
+    Serial.println("PUSH begin fail");
+    return -1;
+  }
+  http.addHeader("X-API-Key", pushKey);
+  http.addHeader("Content-Type", "text/csv; charset=utf-8");
+  const int code = http.POST(body);
+  printHttpCode(code);
+  http.end();
+  return code;
+}
+
 bool uploadRange(const char *path, uint32_t offset, size_t nbytes) {
   File f = FFat.open(path, FILE_READ);
   if (!f) {
@@ -443,24 +486,44 @@ bool uploadRange(const char *path, uint32_t offset, size_t nbytes) {
     f.close();
     return false;
   }
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  http.setTimeout(60000);
-  if (!http.begin(client, pushUrl)) {
-    Serial.println("PUSH begin fail");
-    f.close();
-    return false;
+  String chunk;
+  chunk.reserve(nbytes + 8);
+  while (chunk.length() < nbytes && f.available()) {
+    chunk += static_cast<char>(f.read());
   }
-  http.addHeader("X-API-Key", pushKey);
-  http.addHeader("Content-Type", "text/csv; charset=utf-8");
-  const int code = http.sendRequest("POST", &f, nbytes);
   f.close();
-  http.end();
-  Serial.printf("PUSH %s +%u %uB -> %d\n", path,
-                static_cast<unsigned>(offset), static_cast<unsigned>(nbytes),
-                code);
+  Serial.printf("PUSH %s +%u %uB ...\n", path,
+                static_cast<unsigned>(offset),
+                static_cast<unsigned>(chunk.length()));
+  const int code = httpsPost(chunk);
   return code >= 200 && code < 300;
+}
+
+void pushTest() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("PUSH TEST needs STA Wi-Fi");
+    return;
+  }
+  if (!pushUrl.length() || !pushKey.length()) {
+    Serial.println("PUSH URL and PUSH KEY first");
+    return;
+  }
+  Serial.printf("ip=%s gw=%s dns=%s\n", WiFi.localIP().toString().c_str(),
+                WiFi.gatewayIP().toString().c_str(),
+                WiFi.dnsIP().toString().c_str());
+  const String host = urlHost(pushUrl);
+  IPAddress resolved;
+  if (WiFi.hostByName(host.c_str(), resolved) != 1) {
+    Serial.printf("DNS fail for %s — car Wi-Fi may have no internet\n",
+                  host.c_str());
+    return;
+  }
+  Serial.printf("DNS %s -> %s\n", host.c_str(), resolved.toString().c_str());
+  Serial.println("PUSH TEST small POST ...");
+  const int code =
+      httpsPost("ms,bus,id,dlc,data\n0,A,000,1,00\n");
+  Serial.println((code >= 200 && code < 300) ? "PUSH TEST ok"
+                                             : "PUSH TEST fail");
 }
 
 bool pushMore() {
@@ -532,7 +595,7 @@ void printHelp() {
   Serial.println("HELP  STAT  DUMP  CLEAR  ECHO ON|OFF");
   Serial.println("WIFI ON|OFF  WIFI AP  WIFI JOIN <ssid> <pass>  WIFI SCAN");
   Serial.println("PUSH URL <https://.../api/canlog>  PUSH KEY <api-key>");
-  Serial.println("PUSH NOW  PUSH AUTO ON|OFF");
+  Serial.println("PUSH NOW  PUSH AUTO ON|OFF  PUSH TEST");
 }
 
 void printStat() {
@@ -667,6 +730,8 @@ void handleSerial() {
     Serial.println("push key saved");
   } else if (cmd == "PUSH NOW") {
     pushLogs();
+  } else if (cmd == "PUSH TEST") {
+    pushTest();
   } else if (cmd == "PUSH AUTO ON") {
     pushAuto = true;
     savePushPrefs();
@@ -787,6 +852,7 @@ void loop() {
         staAnnounced = false;
         wifiKind = WIFI_KIND_AP;
         MDNS.end();
+        lastWifiCheck = now;
         Serial.println("STA lost — AP stays up, retrying car Wi-Fi");
       }
       if (now - lastWifiCheck >= 30000) {
