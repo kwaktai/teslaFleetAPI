@@ -11,7 +11,8 @@
  *
  * 시리얼 115200, 명령:
  *   HELP  STAT  DUMP  CLEAR  ECHO ON|OFF
- *   WIFI ON|OFF  WIFI AP  WIFI JOIN <ssid> <pass>  WIFI SCAN
+ *   WIFI ON|OFF  WIFI AP  WIFI JOIN <ssid> <pass>  WIFI LIST
+ *   WIFI FORGET <ssid>  WIFI SCAN
  *   PUSH URL  PUSH KEY  PUSH NOW  PUSH AUTO ON|OFF
  */
 
@@ -37,6 +38,17 @@
 #define WIFI_SSID_DEFAULT "Raven_5G"
 #define WIFI_PASS_DEFAULT ""
 #endif
+#ifndef WIFI_SSID_DEFAULT_2
+#define WIFI_SSID_DEFAULT_2 "Kana_Home"
+#define WIFI_PASS_DEFAULT_2 ""
+#endif
+
+static const uint8_t kMaxStaNets = 4;
+
+struct StaNet {
+  String ssid;
+  String pass;
+};
 
 #define MCP2518_CS 10
 #define MCP2518_SCLK 12
@@ -83,6 +95,9 @@ bool staAnnounced = false;
 bool ntpStarted = false;
 bool ntpOk = false;
 WifiKind wifiKind = WIFI_KIND_AP;
+StaNet staNets[kMaxStaNets];
+uint8_t staNetCount = 0;
+uint8_t staTryIdx = 0;
 String staSsid;
 String staPass;
 String pushUrl;
@@ -111,45 +126,145 @@ String currentWifiIp() {
   return "-";
 }
 
+int findStaNet(const String &ssid) {
+  for (uint8_t i = 0; i < staNetCount; i++) {
+    if (staNets[i].ssid == ssid) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+void applyStaNet(int idx) {
+  if (idx < 0 || idx >= staNetCount) {
+    staSsid = "";
+    staPass = "";
+    return;
+  }
+  staTryIdx = static_cast<uint8_t>(idx);
+  staSsid = staNets[idx].ssid;
+  staPass = staNets[idx].pass;
+}
+
+bool addOrUpdateStaNet(const String &ssid, const String &pass) {
+  if (!ssid.length()) {
+    return false;
+  }
+  const int found = findStaNet(ssid);
+  if (found >= 0) {
+    staNets[found].pass = pass;
+    applyStaNet(found);
+    return true;
+  }
+  if (staNetCount >= kMaxStaNets) {
+    Serial.println("WIFI full (4). WIFI FORGET <ssid> first");
+    return false;
+  }
+  staNets[staNetCount].ssid = ssid;
+  staNets[staNetCount].pass = pass;
+  applyStaNet(staNetCount);
+  staNetCount++;
+  return true;
+}
+
+void mergeDefaultSta(const char *ssid, const char *pass) {
+  if (!ssid || !ssid[0] || !pass || !pass[0]) {
+    return;
+  }
+  if (findStaNet(ssid) >= 0) {
+    return;
+  }
+  addOrUpdateStaNet(ssid, pass);
+}
+
+void saveWifiPrefs(const char *mode) {
+  prefs.begin("t2can", false);
+  prefs.putString("mode", mode);
+  prefs.putUChar("nssid", staNetCount);
+  for (uint8_t i = 0; i < kMaxStaNets; i++) {
+    const String sk = "ssid" + String(i);
+    const String pk = "pass" + String(i);
+    if (i < staNetCount) {
+      prefs.putString(sk.c_str(), staNets[i].ssid);
+      prefs.putString(pk.c_str(), staNets[i].pass);
+    } else {
+      prefs.remove(sk.c_str());
+      prefs.remove(pk.c_str());
+    }
+  }
+  if (staNetCount) {
+    prefs.putString("ssid", staNets[0].ssid);
+    prefs.putString("pass", staNets[0].pass);
+  }
+  prefs.end();
+}
+
+void printWifiList() {
+  Serial.printf("saved STA %u / %u\n",
+                static_cast<unsigned>(staNetCount),
+                static_cast<unsigned>(kMaxStaNets));
+  if (!staNetCount) {
+    Serial.println("  (none)  WIFI JOIN <ssid> <password>");
+  }
+  for (uint8_t i = 0; i < staNetCount; i++) {
+    Serial.printf("  %s  %s\n", staNets[i].ssid.c_str(),
+                  staNets[i].pass.length() ? "pass-set" : "no-pass");
+  }
+  if (strlen(WIFI_SSID_DEFAULT_2) && findStaNet(WIFI_SSID_DEFAULT_2) < 0) {
+    Serial.printf("  add home: WIFI JOIN %s <password>\n", WIFI_SSID_DEFAULT_2);
+  }
+}
+
 void loadWifiPrefs() {
   prefs.begin("t2can", true);
   const String mode = prefs.getString("mode", "");
-  staSsid = prefs.getString("ssid", "");
-  staPass = prefs.getString("pass", "");
+  const uint8_t nssid = prefs.getUChar("nssid", 255);
   pushUrl = prefs.getString("pushUrl", "");
   pushKey = prefs.getString("pushKey", "");
   pushAuto = prefs.getBool("pushAuto", false);
   sentOff = prefs.getUInt("sentOff", 0);
   sentSlot = static_cast<uint8_t>(prefs.getUChar("sentSlot", 0));
+  staNetCount = 0;
+  if (nssid != 255) {
+    const uint8_t n = nssid > kMaxStaNets ? kMaxStaNets : nssid;
+    for (uint8_t i = 0; i < n; i++) {
+      const String ssid = prefs.getString(("ssid" + String(i)).c_str(), "");
+      const String pass = prefs.getString(("pass" + String(i)).c_str(), "");
+      if (ssid.length()) {
+        staNets[staNetCount].ssid = ssid;
+        staNets[staNetCount].pass = pass;
+        staNetCount++;
+      }
+    }
+  } else {
+    const String legacySsid = prefs.getString("ssid", "");
+    const String legacyPass = prefs.getString("pass", "");
+    if (legacySsid.length()) {
+      staNets[0].ssid = legacySsid;
+      staNets[0].pass = legacyPass;
+      staNetCount = 1;
+    }
+  }
   prefs.end();
 
-  if (mode == "sta" && staSsid.length()) {
-    wantSta = true;
-    wifiKind = WIFI_KIND_AP;
-    return;
-  }
+  const uint8_t afterLoad = staNetCount;
+  mergeDefaultSta(WIFI_SSID_DEFAULT, WIFI_PASS_DEFAULT);
+  mergeDefaultSta(WIFI_SSID_DEFAULT_2, WIFI_PASS_DEFAULT_2);
+  applyStaNet(staNetCount ? 0 : -1);
+
   if (mode == "ap") {
     wantSta = false;
-    wifiKind = WIFI_KIND_AP;
-    return;
-  }
-  if (strlen(WIFI_PASS_DEFAULT) > 0) {
-    staSsid = WIFI_SSID_DEFAULT;
-    staPass = WIFI_PASS_DEFAULT;
+  } else if (mode == "sta" && staNetCount) {
     wantSta = true;
-    wifiKind = WIFI_KIND_AP;
-    return;
+  } else if (staNetCount && staPass.length()) {
+    wantSta = true;
+  } else {
+    wantSta = false;
   }
-  wantSta = false;
   wifiKind = WIFI_KIND_AP;
-}
-
-void saveWifiPrefs(const char *mode, const String &ssid, const String &pass) {
-  prefs.begin("t2can", false);
-  prefs.putString("mode", mode);
-  prefs.putString("ssid", ssid);
-  prefs.putString("pass", pass);
-  prefs.end();
+  if (nssid == 255 || staNetCount != afterLoad) {
+    saveWifiPrefs(wantSta ? "sta" : "ap");
+  }
 }
 
 void savePushPrefs() {
@@ -377,12 +492,50 @@ void startWifiAp() {
                 WiFi.softAPIP().toString().c_str());
 }
 
+void selectStaTarget() {
+  if (!staNetCount) {
+    applyStaNet(-1);
+    return;
+  }
+  const int n = WiFi.scanNetworks(false, false);
+  int best = -1;
+  int bestRssi = -200;
+  if (n > 0) {
+    for (int i = 0; i < n; i++) {
+      const int idx = findStaNet(WiFi.SSID(i));
+      if (idx >= 0 && staNets[idx].pass.length() &&
+          WiFi.RSSI(i) > bestRssi) {
+        bestRssi = WiFi.RSSI(i);
+        best = idx;
+      }
+    }
+  }
+  WiFi.scanDelete();
+  if (best >= 0) {
+    applyStaNet(best);
+    return;
+  }
+  for (uint8_t k = 0; k < staNetCount; k++) {
+    staTryIdx = static_cast<uint8_t>((staTryIdx + 1) % staNetCount);
+    if (staNets[staTryIdx].pass.length()) {
+      applyStaNet(staTryIdx);
+      return;
+    }
+  }
+  applyStaNet(0);
+}
+
 void beginStaJoin() {
-  if (!staSsid.length()) {
+  if (!staNetCount) {
     return;
   }
   const int st = WiFi.status();
   if (st == WL_CONNECTED || st == WL_IDLE_STATUS) {
+    return;
+  }
+  selectStaTarget();
+  if (!staSsid.length() || !staPass.length()) {
+    Serial.println("STA saved SSID has no password. WIFI JOIN <ssid> <password>");
     return;
   }
   WiFi.disconnect(false);
@@ -413,7 +566,7 @@ void startWifi() {
   WiFi.disconnect(true);
   WiFi.persistent(false);
   staAnnounced = false;
-  if (wantSta && staSsid.length()) {
+  if (wantSta && staNetCount) {
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(kApSsid, kApPass);
     wifiKind = WIFI_KIND_AP;
@@ -468,13 +621,42 @@ void wifiJoin(const String &ssid, const String &pass) {
     Serial.println("WIFI JOIN <ssid> <password>");
     return;
   }
-  staSsid = ssid;
-  staPass = pass;
+  if (!addOrUpdateStaNet(ssid, pass)) {
+    return;
+  }
   wantSta = true;
   wifiKind = WIFI_KIND_AP;
   wifiOn = true;
-  saveWifiPrefs("sta", staSsid, staPass);
+  saveWifiPrefs("sta");
+  Serial.printf("WIFI saved %s  (%u nets)\n", ssid.c_str(),
+                static_cast<unsigned>(staNetCount));
+  printWifiList();
   startWifi();
+}
+
+void wifiForget(const String &ssid) {
+  const int found = findStaNet(ssid);
+  if (found < 0) {
+    Serial.printf("WIFI FORGET: %s not saved\n", ssid.c_str());
+    printWifiList();
+    return;
+  }
+  for (uint8_t i = static_cast<uint8_t>(found); i + 1 < staNetCount; i++) {
+    staNets[i] = staNets[i + 1];
+  }
+  staNetCount--;
+  staNets[staNetCount].ssid = "";
+  staNets[staNetCount].pass = "";
+  applyStaNet(staNetCount ? 0 : -1);
+  if (!staNetCount) {
+    wantSta = false;
+  }
+  saveWifiPrefs(wantSta ? "sta" : "ap");
+  Serial.printf("WIFI forgot %s\n", ssid.c_str());
+  printWifiList();
+  if (wifiOn) {
+    startWifi();
+  }
 }
 
 static String urlHost(const String &url) {
@@ -634,7 +816,8 @@ void pushLogs() { pushMore(); }
 
 void printHelp() {
   Serial.println("HELP  STAT  DUMP  CLEAR  ECHO ON|OFF");
-  Serial.println("WIFI ON|OFF  WIFI AP  WIFI JOIN <ssid> <pass>  WIFI SCAN");
+  Serial.println("WIFI ON|OFF  WIFI AP  WIFI JOIN <ssid> <pass>  WIFI LIST");
+  Serial.println("WIFI FORGET <ssid>  WIFI SCAN");
   Serial.println("PUSH URL <https://.../api/canlog>  PUSH KEY <api-key>");
   Serial.println("PUSH NOW  PUSH AUTO ON|OFF  PUSH TEST");
 }
@@ -645,12 +828,23 @@ void printStat() {
                 canBOk ? "ok" : "fail", static_cast<unsigned long>(framesB),
                 static_cast<unsigned long>(dropped), activePath(),
                 static_cast<unsigned>(logFile ? logFile.size() + lineUsed : 0));
-  Serial.printf("wifi=%s  ip=%s  ssid=%s\n",
+  Serial.printf("wifi=%s  ip=%s  ssid=%s  saved=%u\n",
                 wifiOn ? ((wifiKind == WIFI_KIND_STA) ? "sta" : "ap") : "off",
                 currentWifiIp().c_str(),
                 wifiOn ? ((wifiKind == WIFI_KIND_STA) ? staSsid.c_str()
                                                      : kApSsid)
-                       : "-");
+                       : "-",
+                static_cast<unsigned>(staNetCount));
+  if (staNetCount) {
+    Serial.print("nets=");
+    for (uint8_t i = 0; i < staNetCount; i++) {
+      if (i) {
+        Serial.print(",");
+      }
+      Serial.print(staNets[i].ssid);
+    }
+    Serial.println();
+  }
   Serial.printf("push=%s  auto=%s  url=%s\n",
                 (pushUrl.length() && pushKey.length()) ? "set" : "off",
                 pushAuto ? "on" : "off",
@@ -750,10 +944,20 @@ void handleSerial() {
     wifiOn = true;
     wantSta = false;
     wifiKind = WIFI_KIND_AP;
-    saveWifiPrefs("ap", staSsid, staPass);
+    saveWifiPrefs("ap");
     startWifi();
   } else if (cmd == "WIFI SCAN") {
     wifiScan();
+  } else if (cmd == "WIFI LIST") {
+    printWifiList();
+  } else if (cmd.startsWith("WIFI FORGET ")) {
+    String rest = skipWord(skipWord(raw));
+    rest.trim();
+    if (!rest.length()) {
+      Serial.println("WIFI FORGET <ssid>");
+    } else {
+      wifiForget(rest);
+    }
   } else if (cmd.startsWith("WIFI JOIN ")) {
     String rest = skipWord(skipWord(raw));
     const int sp = rest.indexOf(' ');
@@ -869,6 +1073,7 @@ void setup() {
   canAOk = startCanA();
   canBOk = startCanB();
   loadWifiPrefs();
+  printWifiList();
   if (wifiOn) {
     startWifi();
   }
@@ -888,7 +1093,7 @@ void loop() {
     flushLog();
     rotateIfNeeded();
   }
-  if (wifiOn && wantSta && staSsid.length()) {
+  if (wifiOn && wantSta && staNetCount) {
     if (WiFi.status() == WL_CONNECTED) {
       announceSta();
       maybeNtp();
@@ -900,7 +1105,7 @@ void loop() {
         lastWifiCheck = now;
         ntpStarted = false;
         ntpOk = false;
-        Serial.println("STA lost — AP stays up, retrying car Wi-Fi");
+        Serial.println("STA lost — AP stays up, retrying saved Wi-Fi");
       }
       if (now - lastWifiCheck >= 30000) {
         lastWifiCheck = now;

@@ -96,7 +96,18 @@ mDNS  http://t2can.local/log.csv
 
 폰/노트북도 **같은 차 Wi-Fi**에 연결한 뒤 그 주소로 엽니다.
 
-`WIFI JOIN` 한 번이면 보드에 저장됩니다. 전원을 껐다 켜도 같은 망을 다시 찾습니다. 부팅 때 망이 꺼져 있으면 보드 AP(`T2CAN-LOG`)를 켜 두고, **30초마다** 차 Wi-Fi를 다시 찾습니다. 한 번 실패하고 끝내지 않습니다. 끊겨도 마찬가지입니다.
+`WIFI JOIN` 은 **추가**입니다. 이미 저장된 차 Wi-Fi를 지우지 않습니다. 최대 4개. 보이는 망 중 저장된 SSID를 골라 붙습니다.
+
+집 Wi-Fi 예:
+
+```
+WIFI JOIN Kana_Home 여기에암호
+WIFI LIST
+```
+
+`WIFI FORGET <ssid>` 로 빼면 됩니다. 암호는 보드에만 저장하세요. GitHub 에 올리지 마세요.
+
+전원을 껐다 켜도 목록을 다시 찾습니다. 부팅 때 망이 꺼져 있으면 보드 AP(`T2CAN-LOG`)를 켜 두고, **30초마다** 저장된 망을 다시 찾습니다. 한 번 실패하고 끝내지 않습니다. 끊겨도 마찬가지입니다.
 
 안 붙으면:
 
@@ -108,7 +119,7 @@ mDNS  http://t2can.local/log.csv
 
 스케치 맨 위 `WIFI_PASS_DEFAULT` 에 암호를 넣고 업로드해도 됩니다. **공개 GitHub에는 암호를 올리지 마세요.**
 
-`WIFI OFF` / `WIFI ON` / `STAT`(할당된 IP 확인) 도 됩니다.
+`WIFI OFF` / `WIFI ON` / `WIFI LIST` / `STAT`(할당된 IP·저장된 SSID 확인) 도 됩니다.
 
 ### 4) 원격에서 보기 (Tailscale은 보드에 올리지 않습니다)
 
