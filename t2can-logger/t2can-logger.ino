@@ -23,6 +23,7 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <time.h>
 #include "driver/twai.h"
 #include "mcp2518fd_can.h"
 
@@ -79,6 +80,8 @@ bool canBOk = false;
 bool pushAuto = false;
 bool wantSta = false;
 bool staAnnounced = false;
+bool ntpStarted = false;
+bool ntpOk = false;
 WifiKind wifiKind = WIFI_KIND_AP;
 String staSsid;
 String staPass;
@@ -208,9 +211,46 @@ bool appendLine(const char *line) {
   return true;
 }
 
+void fillKst(char *out, size_t outLen) {
+  out[0] = '-';
+  out[1] = 0;
+  if (!ntpOk) {
+    return;
+  }
+  struct tm ti;
+  if (!getLocalTime(&ti, 0)) {
+    return;
+  }
+  snprintf(out, outLen, "%04d-%02d-%02d %02d:%02d:%02d", ti.tm_year + 1900,
+           ti.tm_mon + 1, ti.tm_mday, ti.tm_hour, ti.tm_min, ti.tm_sec);
+}
+
+void maybeNtp() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+  if (!ntpStarted) {
+    configTzTime("KST-9", "kr.pool.ntp.org", "time.google.com", "pool.ntp.org");
+    ntpStarted = true;
+    Serial.println("NTP KST starting");
+    return;
+  }
+  if (ntpOk) {
+    return;
+  }
+  struct tm ti;
+  if (getLocalTime(&ti, 0) && ti.tm_year + 1900 >= 2024) {
+    ntpOk = true;
+    Serial.printf("NTP KST %04d-%02d-%02d %02d:%02d:%02d\n", ti.tm_year + 1900,
+                  ti.tm_mon + 1, ti.tm_mday, ti.tm_hour, ti.tm_min, ti.tm_sec);
+  }
+}
+
 void logFrame(char bus, uint32_t id, uint8_t len, const uint8_t *data) {
-  char line[96];
-  int pos = snprintf(line, sizeof(line), "%lu,%c,%03lX,%u,",
+  char when[24];
+  fillKst(when, sizeof(when));
+  char line[128];
+  int pos = snprintf(line, sizeof(line), "%s,%lu,%c,%03lX,%u,", when,
                      static_cast<unsigned long>(millis()), bus,
                      static_cast<unsigned long>(id), len);
   if (pos < 0 || pos >= static_cast<int>(sizeof(line))) {
@@ -245,7 +285,7 @@ void openLog() {
     return;
   }
   if (logFile.size() == 0) {
-    logFile.print("ms,bus,id,dlc,data\n");
+    logFile.print("time,ms,bus,id,dlc,data\n");
     logFile.flush();
   }
   Serial.printf("log file %s  size=%u\n", activePath(),
@@ -363,6 +403,7 @@ void announceSta() {
   }
   Serial.printf("STA OK  http://%s/log.csv\n",
                 WiFi.localIP().toString().c_str());
+  maybeNtp();
 }
 
 void startWifi() {
@@ -521,7 +562,7 @@ void pushTest() {
   Serial.printf("DNS %s -> %s\n", host.c_str(), resolved.toString().c_str());
   Serial.println("PUSH TEST small POST ...");
   const int code =
-      httpsPost("ms,bus,id,dlc,data\n0,A,000,1,00\n");
+      httpsPost("time,ms,bus,id,dlc,data\n-,0,A,000,1,00\n");
   Serial.println((code >= 200 && code < 300) ? "PUSH TEST ok"
                                              : "PUSH TEST fail");
 }
@@ -614,6 +655,9 @@ void printStat() {
                 (pushUrl.length() && pushKey.length()) ? "set" : "off",
                 pushAuto ? "on" : "off",
                 pushUrl.length() ? pushUrl.c_str() : "-");
+  char when[24];
+  fillKst(when, sizeof(when));
+  Serial.printf("time=%s  ntp=%s\n", when, ntpOk ? "ok" : "wait");
 }
 
 void streamFileToSerial(const char *path) {
@@ -847,12 +891,15 @@ void loop() {
   if (wifiOn && wantSta && staSsid.length()) {
     if (WiFi.status() == WL_CONNECTED) {
       announceSta();
+      maybeNtp();
     } else {
       if (staAnnounced) {
         staAnnounced = false;
         wifiKind = WIFI_KIND_AP;
         MDNS.end();
         lastWifiCheck = now;
+        ntpStarted = false;
+        ntpOk = false;
         Serial.println("STA lost — AP stays up, retrying car Wi-Fi");
       }
       if (now - lastWifiCheck >= 30000) {

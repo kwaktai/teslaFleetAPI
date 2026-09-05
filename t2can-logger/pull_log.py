@@ -73,7 +73,7 @@ def live(port: str, out: Path, baud: int) -> None:
     new_file = not out.exists() or out.stat().st_size == 0
     with out.open("a", encoding="utf-8") as fh:
         if new_file:
-            fh.write("ms,bus,id,dlc,data\n")
+            fh.write("time,ms,bus,id,dlc,data\n")
         try:
             while True:
                 raw = ser.readline()
@@ -81,8 +81,13 @@ def live(port: str, out: Path, baud: int) -> None:
                     continue
                 text = raw.decode("utf-8", errors="replace")
                 line = text.rstrip("\r\n")
-                parts = line.split(",", 4)
-                if len(parts) < 4 or parts[1] not in ("A", "B"):
+                parts = line.split(",")
+                bus = ""
+                if len(parts) >= 6 and parts[2] in ("A", "B"):
+                    bus = parts[2]
+                elif len(parts) >= 5 and parts[1] in ("A", "B"):
+                    bus = parts[1]
+                if not bus:
                     continue
                 fh.write(line + "\n")
                 fh.flush()
