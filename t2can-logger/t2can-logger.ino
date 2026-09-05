@@ -92,6 +92,7 @@ bool canBOk = false;
 bool pushAuto = false;
 bool wantSta = false;
 bool staAnnounced = false;
+bool staSearching = false;
 bool ntpStarted = false;
 bool ntpOk = false;
 WifiKind wifiKind = WIFI_KIND_AP;
@@ -103,6 +104,7 @@ String staPass;
 String pushUrl;
 String pushKey;
 
+static const uint32_t kStaSearchEveryMs = 10UL * 1000UL;
 static const uint32_t kPushEveryMs = 60UL * 1000UL;
 static const size_t kPushChunk = 48UL * 1024UL;
 static const int kPushChunks = 4;
@@ -525,12 +527,27 @@ void selectStaTarget() {
   applyStaNet(0);
 }
 
-void beginStaJoin() {
+void printStaSearchTargets() {
+  Serial.print("STA search ");
   if (!staNetCount) {
+    Serial.println("(none)");
     return;
   }
-  const int st = WiFi.status();
-  if (st == WL_CONNECTED || st == WL_IDLE_STATUS) {
+  for (uint8_t i = 0; i < staNetCount; i++) {
+    if (i) {
+      Serial.print(", ");
+    }
+    Serial.print(staNets[i].ssid);
+  }
+  Serial.println(" — connect to stop");
+}
+
+void beginStaJoin() {
+  if (!staSearching || !staNetCount) {
+    return;
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    staSearching = false;
     return;
   }
   selectStaTarget();
@@ -541,7 +558,7 @@ void beginStaJoin() {
   WiFi.disconnect(false);
   delay(50);
   WiFi.begin(staSsid.c_str(), staPass.c_str());
-  Serial.printf("STA joining %s (keeps retrying) ...\n", staSsid.c_str());
+  Serial.printf("STA joining %s\n", staSsid.c_str());
 }
 
 void announceSta() {
@@ -549,13 +566,18 @@ void announceSta() {
     return;
   }
   staAnnounced = true;
+  staSearching = false;
   wifiKind = WIFI_KIND_STA;
+  if (WiFi.SSID().length()) {
+    staSsid = WiFi.SSID();
+  }
   if (MDNS.begin("t2can")) {
     MDNS.addService("http", "tcp", 80);
     Serial.println("mDNS  http://t2can.local/log.csv");
   }
-  Serial.printf("STA OK  http://%s/log.csv\n",
+  Serial.printf("STA OK  %s  http://%s/log.csv\n", staSsid.c_str(),
                 WiFi.localIP().toString().c_str());
+  Serial.println("STA search stopped");
   maybeNtp();
 }
 
@@ -566,7 +588,8 @@ void startWifi() {
   WiFi.disconnect(true);
   WiFi.persistent(false);
   staAnnounced = false;
-  if (wantSta && staNetCount) {
+  staSearching = wantSta && staNetCount;
+  if (staSearching) {
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(kApSsid, kApPass);
     wifiKind = WIFI_KIND_AP;
@@ -574,6 +597,7 @@ void startWifi() {
     Serial.printf("Wi-Fi AP %s  /  %s\n", kApSsid, kApPass);
     Serial.printf("download  http://%s/log.csv\n",
                   WiFi.softAPIP().toString().c_str());
+    printStaSearchTargets();
     beginStaJoin();
     lastWifiCheck = millis();
     return;
@@ -587,6 +611,8 @@ void stopWifi() {
   WiFi.softAPdisconnect(true);
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
+  staSearching = false;
+  staAnnounced = false;
   Serial.println("Wi-Fi OFF");
 }
 
@@ -828,13 +854,14 @@ void printStat() {
                 canBOk ? "ok" : "fail", static_cast<unsigned long>(framesB),
                 static_cast<unsigned long>(dropped), activePath(),
                 static_cast<unsigned>(logFile ? logFile.size() + lineUsed : 0));
-  Serial.printf("wifi=%s  ip=%s  ssid=%s  saved=%u\n",
+  Serial.printf("wifi=%s  ip=%s  ssid=%s  saved=%u  search=%s\n",
                 wifiOn ? ((wifiKind == WIFI_KIND_STA) ? "sta" : "ap") : "off",
                 currentWifiIp().c_str(),
                 wifiOn ? ((wifiKind == WIFI_KIND_STA) ? staSsid.c_str()
                                                      : kApSsid)
                        : "-",
-                static_cast<unsigned>(staNetCount));
+                static_cast<unsigned>(staNetCount),
+                staSearching ? "on" : "off");
   if (staNetCount) {
     Serial.print("nets=");
     for (uint8_t i = 0; i < staNetCount; i++) {
@@ -1095,19 +1122,27 @@ void loop() {
   }
   if (wifiOn && wantSta && staNetCount) {
     if (WiFi.status() == WL_CONNECTED) {
+      if (staSearching) {
+        staSearching = false;
+      }
       announceSta();
       maybeNtp();
     } else {
       if (staAnnounced) {
         staAnnounced = false;
+        staSearching = true;
         wifiKind = WIFI_KIND_AP;
         MDNS.end();
-        lastWifiCheck = now;
+        lastWifiCheck = 0;
         ntpStarted = false;
         ntpOk = false;
-        Serial.println("STA lost — AP stays up, retrying saved Wi-Fi");
+        Serial.println("STA lost — AP stays up, searching all saved Wi-Fi");
+        printStaSearchTargets();
+      } else if (!staSearching) {
+        staSearching = true;
       }
-      if (now - lastWifiCheck >= 30000) {
+      if (staSearching &&
+          (lastWifiCheck == 0 || now - lastWifiCheck >= kStaSearchEveryMs)) {
         lastWifiCheck = now;
         beginStaJoin();
       }
