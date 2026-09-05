@@ -4,7 +4,12 @@
 
 ## 보드에 올리기
 
-Arduino IDE, 이전과 같은 설정입니다.
+**파일 → 열기**로 항상 `t2can-logger/t2can-logger.ino` 만 여세요.  
+`2CAN_FD.ino` 같은 다른 스케치를 열면 IDE가 보드 설정을 기본값(4MB, CDC 꺼짐)으로 되돌립니다.
+
+같은 폴더의 `sketch.yaml` 에 T-2CAN FD 설정이 들어 있습니다. Arduino IDE 2.3 이상이면 스케치를 열었을 때 프로필 `t2can-fd` 를 고르면 됩니다.
+
+수동으로 맞출 때:
 
 - 보드: `ESP32S3 Dev Module`
 - USB CDC On Boot: Enabled
@@ -12,7 +17,9 @@ Arduino IDE, 이전과 같은 설정입니다.
 - Partition Scheme: **16M Flash (3MB APP/9.9MB FATFS)** ← 로그를 여기에 씁니다
 - PSRAM: OPI PSRAM
 
-`t2can-logger.ino` 를 열고 업로드합니다. `mcp2518fd_can.h` 는 이미 복사한 Longan_CANFD 가 있어야 합니다.
+한 번 맞춘 뒤에는 **같은 `t2can-logger.ino` 만** 다시 열면 IDE가 그 설정을 기억합니다.
+
+`mcp2518fd_can.h` 는 `Arduino/libraries/Longan_CANFD` 가 있어야 합니다.
 
 시리얼 115200 에서 `CAN A listen-only 500k OK` 가 보이면 됩니다.
 
