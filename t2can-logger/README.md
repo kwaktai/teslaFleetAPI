@@ -19,6 +19,14 @@
 
 한 번 맞춘 뒤에는 **같은 `t2can-logger.ino` 만** 다시 열면 IDE가 그 설정을 기억합니다.
 
+코드를 최신으로 받을 때는 폴더를 바꾸지 말고 덮어쓰세요. Arduino IDE는 닫고:
+
+```sh
+bash t2can-logger/update-from-github.sh
+```
+
+맥에서 대상 폴더가 다르면 경로를 인자로 줍니다. `canlog-*.csv`, `data/`, `.env` 는 지우지 않습니다.
+
 `mcp2518fd_can.h` 는 `Arduino/libraries/Longan_CANFD` 가 있어야 합니다.
 
 시리얼 115200 에서 `CAN A listen-only 500k OK` 가 보이면 됩니다.
