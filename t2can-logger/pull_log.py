@@ -31,9 +31,11 @@ def pick_port(preferred: str | None) -> str:
 
 
 def pull(port: str, out: Path, baud: int) -> None:
+    print("포트 여는 중 (보드가 잠시 재시작될 수 있음)...")
     ser = serial.Serial(port, baud, timeout=1)
-    time.sleep(2.0)
+    time.sleep(4.0)
     ser.reset_input_buffer()
+    print("DUMP 요청")
     ser.write(b"DUMP\n")
     ser.flush()
 
@@ -41,11 +43,15 @@ def pull(port: str, out: Path, baud: int) -> None:
     lines: list[str] = []
     deadline = time.time() + 600
     last_data = time.time()
+    last_print = 0
     while time.time() < deadline:
         raw = ser.readline()
         if not raw:
             if collecting and time.time() - last_data > 8:
                 print("덤프가 멈춘 것 같습니다. 받은 줄만 저장합니다.")
+                break
+            if not collecting and time.time() - last_data > 20:
+                print("보드가 DUMP에 응답하지 않습니다. 시리얼 모니터를 닫고 다시 시도하세요.")
                 break
             continue
         text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -53,16 +59,21 @@ def pull(port: str, out: Path, baud: int) -> None:
             collecting = True
             lines.clear()
             last_data = time.time()
+            print("받는 중...")
             continue
         if text == "---LOG-END---":
+            print("DUMP 끝")
             break
         if collecting:
             lines.append(text)
             last_data = time.time()
+            if len(lines) - last_print >= 2000:
+                last_print = len(lines)
+                print(f"  {len(lines)} 줄")
 
     ser.close()
     out.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-    print(f"저장: {out}  ({len(lines)} 줄)")
+    print(f"저장: {out.resolve()}  ({len(lines)} 줄)")
 
 
 def live(port: str, out: Path, baud: int) -> None:
