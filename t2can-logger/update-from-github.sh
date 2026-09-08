@@ -60,6 +60,11 @@ rsync -a \
   --exclude '__pycache__/' \
   "$SRC/" "$TARGET/"
 
+if [[ -d "$TARGET/t2can-logger/src" ]]; then
+  rm -rf "$TARGET/t2can-logger/src"
+  echo "예전 t2can-logger/src 폴더를 지웠습니다 (중복 컴파일 방지)."
+fi
+
 echo "완료. 다음부터는 이 폴더에서:"
 echo "  bash t2can-logger/update-from-github.sh"
 echo "로거만 다시 열려면:  $TARGET/t2can-logger/t2can-logger.ino"

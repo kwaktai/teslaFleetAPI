@@ -32,6 +32,11 @@ try {
   if ($LASTEXITCODE -ge 8) {
     throw "robocopy failed: $LASTEXITCODE"
   }
+  $staleSrc = Join-Path $RepoRoot "t2can-logger\src"
+  if (Test-Path $staleSrc) {
+    Remove-Item -Recurse -Force $staleSrc
+    Write-Host "예전 t2can-logger\\src 폴더를 지웠습니다 (중복 컴파일 방지)."
+  }
 } finally {
   Remove-Item -Recurse -Force $Tmp
 }
