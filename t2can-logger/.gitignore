@@ -1,0 +1,3 @@
+__pycache__/
+*.pyc
+wifi_secrets.h
