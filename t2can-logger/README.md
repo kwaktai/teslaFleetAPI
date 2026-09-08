@@ -80,6 +80,41 @@ python pull_log.py --port COM5
 
 다른 명령: `STAT` 상태, `CLEAR` 로그 삭제, `ECHO ON` 실시간 출력.
 
+### 기기 동작 로그 (CSV 가 안 커질 때)
+
+CAN 프레임과 별도로 보드가 자기 동작을 `/events.log` 에 남깁니다.
+
+- `boot reset=...` 부팅과 **재시작 원인** (`poweron`, `BROWNOUT` 전원 부족, `PANIC` 크래시, `WDT`)
+- `sta join / sta ok / sta lost` Wi-Fi 연결·끊김 (IP, 신호세기, 게이트웨이, DNS)
+- `push ok / push FAIL http 401 / push FAIL connection refused` NAS 업로드 결과
+- `hb ...` 1분마다: 지난 1분 A/B 프레임 수, 드롭, 파일 크기, Wi-Fi, PUSH 성공/실패 누계, 힙
+- `A chip=... → 판정` 1분마다 CAN A(MCP2518FD) 레지스터 진단 (아래)
+
+꺼내는 방법 세 가지:
+
+| 방법 | 어떻게 |
+|---|---|
+| 시리얼 | `LOG` (최근), `LOG ALL` (전체), `LOG CLEAR` |
+| PC | `python pull_log.py --port COM5 --events` → `t2can-events-날짜.log` |
+| 웹 | `http://192.168.4.1/events.log` (보드 AP) 또는 NAS `/canlog` 페이지 아래 "기기 동작 로그" |
+
+NAS 에는 CSV 와 함께 자동으로 올라갑니다(`?kind=events`, `events-날짜.log`). 어제처럼 CSV 가 안 커졌으면 이 로그의 `hb` 줄에서 **Wi-Fi 가 붙어 있었는지, PUSH 가 실패했는지(코드), A/B 프레임이 들어오긴 했는지**가 바로 갈립니다.
+
+### CAN A 가 조용할 때 — `CANA`
+
+시리얼에 `CANA` 를 치면(`STAT` 에도 포함) MCP2518FD 레지스터를 직접 읽어 한 줄로 판정합니다.
+
+| 판정 | 뜻 | 확인할 것 |
+|---|---|---|
+| `칩 응답 없음(SPI)` | 컨트롤러가 SPI 에 답하지 않음 | 보드 불량, 전원 |
+| `리슨온리 아님` | 모드 설정 실패 | 펌웨어 다시 올리기 |
+| `버스 신호 없음` | 에러도 프레임도 0 | **9/10 배선·커넥터**, 또는 차가 잠들어 그 버스가 조용함 |
+| `신호는 있는데 프레임 오류` | stuff/form/crc 에러가 늘어남 | 속도(500k) 불일치, **H/L 바뀜** |
+| `칩은 프레임을 받는데 FIFO 못 읽음` | `efmsg` 는 늘고 `frames` 는 0 | 드라이버 문제 — 이 줄을 그대로 알려주세요 |
+| `정상 수신` | 프레임이 들어옴 | — |
+
+참고: 예전 `CAN A ... OK` 는 라이브러리가 항상 OK 를 돌려줘서 의미가 없었습니다. 이제는 실제로 리슨온리 모드에 들어갔는지 레지스터로 확인한 뒤에만 OK 를 찍습니다.
+
 ### 2) 주행 중 PC 에 바로 저장 (용량 제한 없음)
 
 보드 USB 를 노트북에 꽂은 채:
@@ -132,7 +167,7 @@ WIFI LIST
 
 스케치 맨 위 `WIFI_PASS_DEFAULT` 에 암호를 넣고 업로드해도 됩니다. **공개 GitHub에는 암호를 올리지 마세요.**
 
-`WIFI OFF` / `WIFI ON` / `WIFI LIST` / `STAT`(할당된 IP·저장된 SSID 확인) 도 됩니다.
+`WIFI OFF` / `WIFI ON` / `WIFI LIST` / `STAT`(할당된 IP·저장된 SSID 확인) 도 됩니다. 붙었다 끊긴 이력은 `LOG` 로 봅니다.
 
 ### 4) 원격에서 보기 (Tailscale은 보드에 올리지 않습니다)
 

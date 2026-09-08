@@ -35,20 +35,70 @@ function dayPath(day) {
   return path.join(dir(), `${day}.csv`);
 }
 
-function todayKey(d = new Date()) {
-  return d.toISOString().slice(0, 10);
+// 보드의 기기 동작 로그(부팅·Wi-Fi·PUSH 결과·CAN 진단). CSV 와 별도 파일.
+function eventPath(day) {
+  return path.join(dir(), `events-${day}.log`);
 }
 
 function isDayName(name) {
   return /^\d{4}-\d{2}-\d{2}\.csv$/.test(name);
 }
 
+function isEventName(name) {
+  return /^events-\d{4}-\d{2}-\d{2}\.log$/.test(name);
+}
+
+function isValidDay(day) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(day);
+}
+
 function pruneOld() {
-  const files = fs.readdirSync(dir()).filter(isDayName).sort();
-  const extra = files.length - KEEP_DAYS;
-  for (let i = 0; i < extra; i++) {
-    fs.unlinkSync(path.join(dir(), files[i]));
+  for (const filter of [isDayName, isEventName]) {
+    const files = fs.readdirSync(dir()).filter(filter).sort();
+    const extra = files.length - KEEP_DAYS;
+    for (let i = 0; i < extra; i++) {
+      fs.unlinkSync(path.join(dir(), files[i]));
+    }
   }
+}
+
+export function listEventDays() {
+  if (!fs.existsSync(dir())) {
+    return [];
+  }
+  return fs
+    .readdirSync(dir())
+    .filter(isEventName)
+    .sort()
+    .reverse()
+    .map((name) => {
+      const day = name.slice(7, 17);
+      const st = fs.statSync(path.join(dir(), name));
+      return { day, bytes: st.size, updatedAt: formatSeoul(st.mtime) };
+    });
+}
+
+export function saveEvents(body) {
+  fs.mkdirSync(dir(), { recursive: true });
+  const text = typeof body === 'string' ? body : String(body ?? '');
+  const day = todayKey();
+  const file = eventPath(day);
+  fs.appendFileSync(file, text.endsWith('\n') ? text : `${text}\n`);
+  pruneOld();
+  return { day, bytes: fs.statSync(file).size, updatedAt: formatSeoul(new Date()) };
+}
+
+export function readEvents(day) {
+  const days = listEventDays();
+  const pick = day || (days.length ? days[0].day : '');
+  if (!isValidDay(pick)) {
+    return null;
+  }
+  const file = eventPath(pick);
+  if (!fs.existsSync(file)) {
+    return null;
+  }
+  return fs.readFileSync(file, 'utf8');
 }
 
 export function listDays() {
@@ -83,6 +133,9 @@ export function saveCanlog(body) {
 }
 
 export function readDay(day) {
+  if (!isValidDay(day)) {
+    return null;
+  }
   const file = dayPath(day);
   if (!fs.existsSync(file)) {
     return null;
@@ -117,6 +170,15 @@ export function renderCanlogPage() {
         `<td>${row.updatedAt}</td></tr>`
     )
     .join('');
+  const eventDays = listEventDays();
+  const eventRows = eventDays
+    .map(
+      (row) =>
+        `<tr><td><a href="/api/canlog?kind=events&day=${row.day}">${row.day}</a></td>` +
+        `<td>${row.bytes.toLocaleString()} bytes</td>` +
+        `<td>${row.updatedAt}</td></tr>`
+    )
+    .join('');
   return `<!doctype html>
 <meta charset="utf-8">
 <title>T-2CAN 로그</title>
@@ -132,5 +194,13 @@ table{border-collapse:collapse}td,th{padding:6px 12px 6px 0;text-align:left}</st
       : '아직 없습니다. 보드 시리얼에서 <code>PUSH URL</code> / <code>PUSH KEY</code> / <code>PUSH AUTO ON</code>'
   }</p>
 <table><tr><th>날짜 (KST)</th><th>크기</th><th>마지막 업로드 (KST)</th></tr>${rows}</table>
+<h2>기기 동작 로그</h2>
+<p>보드가 1분마다 남기는 상태(<code>hb</code>)와 부팅·재시작 원인, Wi-Fi 연결/끊김, PUSH 성공·실패,
+CAN A 진단 판정입니다. CSV 가 안 커질 때 여기서 이유를 봅니다. 보드 시리얼에서는 <code>LOG</code>.</p>
+${
+  eventDays.length
+    ? `<table><tr><th>날짜 (KST)</th><th>크기</th><th>마지막 업로드 (KST)</th></tr>${eventRows}</table>`
+    : '<p>아직 없습니다. 보드가 Wi-Fi 에 붙으면 CSV 와 함께 올라옵니다.</p>'
+}
 <p><a href="/">서버 홈</a></p>`;
 }

@@ -26,6 +26,8 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <time.h>
+#include <stdarg.h>
+#include <esp_system.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/message_buffer.h"
 #include "freertos/task.h"
@@ -59,6 +61,13 @@ static const char *kLog0 = "/canlog0.csv";
 static const char *kLog1 = "/canlog1.csv";
 static const size_t kRotateBytes = 3UL * 1024UL * 1024UL;
 static const size_t kBufBytes = 4096;
+
+// 기기 동작 로그(부팅·재시작 원인·Wi-Fi·PUSH 결과·CAN 상태). CAN 프레임과
+// 별도 파일. 시리얼 LOG, 웹 /events.log, NAS ?kind=events 로 꺼낸다.
+static const char *kEvtPath = "/events.log";
+static const char *kEvtOld = "/events.old";
+static const size_t kEvtMax = 256UL * 1024UL;
+static const uint32_t kHbEveryMs = 60UL * 1000UL;
 
 static const char *kApSsid = "T2CAN-LOG";
 static const char *kApPass = "teslalog1";
@@ -100,6 +109,13 @@ uint32_t staNoLinkMs = 0;
 uint32_t lastPushMs = 0;
 uint32_t sentOff = 0;
 uint8_t sentSlot = 0;
+uint32_t evtSentOff = 0;
+uint32_t lastHbMs = 0;
+uint32_t hbMarkA = 0;
+uint32_t hbMarkB = 0;
+uint32_t pushOkCount = 0;
+uint32_t pushFailCount = 0;
+int pushLastCode = 0;
 bool echoSerial = false;
 bool wifiOn = true;
 bool httpBound = false;
@@ -130,8 +146,97 @@ static const int kPushChunks = 4;
 void handleRoot();
 void handleStat();
 void handleLog();
+void handleEvents();
+void fillKst(char *out, size_t outLen);
+void savePushPrefs();
 
 static const char *activePath() { return logSlot ? kLog1 : kLog0; }
+
+// ---------- 기기 동작 로그 ----------
+// loop()/setup() 에서만 부른다 (CAN 수신 태스크에서는 금지: FFat 은 한 태스크만).
+void evt(const char *fmt, ...) {
+  char msg[200];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(msg, sizeof(msg), fmt, ap);
+  va_end(ap);
+  char when[24];
+  fillKst(when, sizeof(when));
+  char line[256];
+  snprintf(line, sizeof(line), "%s up=%lu %s\n", when,
+           static_cast<unsigned long>(millis() / 1000), msg);
+  Serial.print(line);
+  if (!FFat.totalBytes()) {
+    return;
+  }
+  File f = FFat.open(kEvtPath, FILE_APPEND);
+  if (!f) {
+    return;
+  }
+  f.print(line);
+  const size_t sz = f.size();
+  f.close();
+  if (sz > kEvtMax) {
+    FFat.remove(kEvtOld);
+    FFat.rename(kEvtPath, kEvtOld);
+    evtSentOff = 0;
+    savePushPrefs();
+  }
+}
+
+const char *resetReasonText(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON: return "poweron";
+    case ESP_RST_EXT: return "ext-pin";
+    case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "PANIC(crash)";
+    case ESP_RST_INT_WDT: return "INT-WDT";
+    case ESP_RST_TASK_WDT: return "TASK-WDT";
+    case ESP_RST_WDT: return "WDT";
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    case ESP_RST_BROWNOUT: return "BROWNOUT(power dip)";
+    case ESP_RST_SDIO: return "sdio";
+    default: return "unknown";
+  }
+}
+
+// CAN A(MCP2518FD) 가 왜 조용한지 레지스터로 가른다.
+// 결과 한 줄 + 판정을 out 에 쓴다.
+void describeCanA(char *out, size_t outLen, uint32_t framesSince) {
+  McpDiag d;
+  if (!canA.diag(d, true)) {
+    snprintf(out, outLen, "A diag: SPI busy");
+    return;
+  }
+  const bool anyErr = d.stuffErr || d.formErr || d.crcErr || d.bit0Err ||
+                      d.bit1Err || d.ackErr || d.nrerr > 0;
+  const char *verdict;
+  if (!d.alive) {
+    verdict = "칩 응답 없음(SPI) → 보드 불량/전원";
+  } else if (!d.oscReady) {
+    verdict = "오실레이터 미준비";
+  } else if (d.opmod != 3) {
+    verdict = "리슨온리 아님(모드 이상)";
+  } else if (d.busOff) {
+    verdict = "버스오프";
+  } else if (framesSince > 0) {
+    verdict = "정상 수신";
+  } else if (d.efmsg > 0) {
+    verdict = "칩은 프레임을 받는데 FIFO 못 읽음 → 드라이버/필터";
+  } else if (anyErr) {
+    verdict = "신호는 있는데 프레임 오류 → 속도 불일치 또는 H/L 바뀜";
+  } else {
+    verdict = "버스 신호 없음 → 9/10 배선·커넥터 또는 그 버스가 잠듦";
+  }
+  snprintf(out, outLen,
+           "A chip=%s osc=%s mode=%u rec=%u tec=%u efmsg=%u rxerr=%u "
+           "stuff=%u form=%u crc=%u bit0=%u bit1=%u ack=%u rxov=%u int=%s "
+           "frames=%lu → %s",
+           d.alive ? "ok" : "NONE", d.oscReady ? "ok" : "no", d.opmod, d.rec,
+           d.tec, d.efmsg, d.nrerr, d.stuffErr, d.formErr, d.crcErr, d.bit0Err,
+           d.bit1Err, d.ackErr, d.rxOverflow, d.intLow ? "low" : "high",
+           static_cast<unsigned long>(framesSince), verdict);
+}
 
 String currentWifiIp() {
   if (!wifiOn) {
@@ -244,6 +349,7 @@ void loadWifiPrefs() {
   pushAuto = prefs.getBool("pushAuto", false);
   sentOff = prefs.getUInt("sentOff", 0);
   sentSlot = static_cast<uint8_t>(prefs.getUChar("sentSlot", 0));
+  evtSentOff = prefs.getUInt("evtOff", 0);
   staNetCount = 0;
   if (nssid != 255) {
     const uint8_t n = nssid > kMaxStaNets ? kMaxStaNets : nssid;
@@ -294,6 +400,7 @@ void savePushPrefs() {
   prefs.putBool("pushAuto", pushAuto);
   prefs.putUInt("sentOff", sentOff);
   prefs.putUChar("sentSlot", sentSlot);
+  prefs.putUInt("evtOff", evtSentOff);
   prefs.end();
 }
 
@@ -302,6 +409,7 @@ void bindHttp() {
     http.on("/", handleRoot);
     http.on("/stat", handleStat);
     http.on("/log.csv", handleLog);
+    http.on("/events.log", handleEvents);
     httpBound = true;
   }
   http.begin();
@@ -325,19 +433,20 @@ void rotateIfNeeded() {
   logSlot = logSlot ? 0 : 1;
   FFat.remove(activePath());
   logFile = FFat.open(activePath(), FILE_APPEND);
+  evt("can log rotate -> %s", activePath());
 }
 
 bool appendLine(const char *line) {
   const size_t n = strlen(line);
   if (n + 1 > kBufBytes) {
-    dropped++;
+    dropped = dropped + 1;
     return false;
   }
   if (lineUsed + n > kBufBytes) {
     flushLog();
     rotateIfNeeded();
     if (!logFile) {
-      dropped++;
+      dropped = dropped + 1;
       return false;
     }
   }
@@ -376,8 +485,8 @@ void maybeNtp() {
   struct tm ti;
   if (getLocalTime(&ti, 0) && ti.tm_year + 1900 >= 2024) {
     ntpOk = true;
-    Serial.printf("NTP KST %04d-%02d-%02d %02d:%02d:%02d\n", ti.tm_year + 1900,
-                  ti.tm_mon + 1, ti.tm_mday, ti.tm_hour, ti.tm_min, ti.tm_sec);
+    evt("ntp ok %04d-%02d-%02d %02d:%02d:%02d KST", ti.tm_year + 1900,
+        ti.tm_mon + 1, ti.tm_mday, ti.tm_hour, ti.tm_min, ti.tm_sec);
   }
 }
 
@@ -389,7 +498,7 @@ void logFrame(char bus, uint32_t id, uint8_t len, const uint8_t *data) {
                      static_cast<unsigned long>(millis()), bus,
                      static_cast<unsigned long>(id), len);
   if (pos < 0 || pos >= static_cast<int>(sizeof(line))) {
-    dropped++;
+    dropped = dropped + 1;
     return;
   }
   for (uint8_t i = 0; i < len && pos < static_cast<int>(sizeof(line)) - 4; i++) {
@@ -400,7 +509,7 @@ void logFrame(char bus, uint32_t id, uint8_t len, const uint8_t *data) {
     line[pos++] = '\n';
     line[pos] = 0;
   } else {
-    dropped++;
+    dropped = dropped + 1;
     return;
   }
 
@@ -415,7 +524,7 @@ void logFrame(char bus, uint32_t id, uint8_t len, const uint8_t *data) {
   // 부분 쓰기는 줄을 깨뜨리므로 자리가 있을 때만 넣는다.
   if (xMessageBufferSpacesAvailable(canQueue) < n + 4 ||
       xMessageBufferSend(canQueue, line, n, 0) != n) {
-    dropped++;
+    dropped = dropped + 1;
   }
 }
 
@@ -468,6 +577,7 @@ void handleRoot() {
   html += (wifiKind == WIFI_KIND_STA) ? F("STA ") : F("AP ");
   html += currentWifiIp();
   html += F("</p><p><a href='/log.csv'>log.csv 다운로드</a></p>");
+  html += F("<p><a href='/events.log'>기기 동작 로그 (events.log)</a></p>");
   html += F("<p><a href='/stat'>stat</a></p>");
   http.send(200, "text/html; charset=utf-8", html);
 }
@@ -526,6 +636,13 @@ void handleLog() {
     sendFileToHttp(kLog1);
     sendFileToHttp(kLog0);
   }
+}
+
+void handleEvents() {
+  http.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  http.send(200, "text/plain; charset=utf-8", "");
+  sendFileToHttp(kEvtOld);
+  sendFileToHttp(kEvtPath);
 }
 
 void startWifiAp() {
@@ -610,7 +727,7 @@ void beginStaJoin() {
   WiFi.disconnect(false);
   delay(50);
   WiFi.begin(staSsid.c_str(), staPass.c_str());
-  Serial.printf("STA joining %s\n", staSsid.c_str());
+  evt("sta join %s", staSsid.c_str());
 }
 
 void announceSta() {
@@ -627,7 +744,10 @@ void announceSta() {
     MDNS.addService("http", "tcp", 80);
     Serial.println("mDNS  http://t2can.local/log.csv");
   }
-  Serial.printf("STA OK  %s  http://%s/log.csv\n", staSsid.c_str(),
+  evt("sta ok %s ip=%s rssi=%d gw=%s dns=%s", staSsid.c_str(),
+      WiFi.localIP().toString().c_str(), WiFi.RSSI(),
+      WiFi.gatewayIP().toString().c_str(), WiFi.dnsIP().toString().c_str());
+  Serial.printf("download  http://%s/log.csv\n",
                 WiFi.localIP().toString().c_str());
   Serial.println("STA search stopped");
   maybeNtp();
@@ -710,8 +830,8 @@ void wifiJoin(const String &ssid, const String &pass) {
   wifiKind = WIFI_KIND_AP;
   wifiOn = true;
   saveWifiPrefs("sta");
-  Serial.printf("WIFI saved %s  (%u nets)\n", ssid.c_str(),
-                static_cast<unsigned>(staNetCount));
+  evt("wifi saved %s (%u nets)", ssid.c_str(),
+      static_cast<unsigned>(staNetCount));
   printWifiList();
   startWifi();
 }
@@ -734,7 +854,7 @@ void wifiForget(const String &ssid) {
     wantSta = false;
   }
   saveWifiPrefs(wantSta ? "sta" : "ap");
-  Serial.printf("WIFI forgot %s\n", ssid.c_str());
+  evt("wifi forgot %s", ssid.c_str());
   printWifiList();
   if (wifiOn) {
     startWifi();
@@ -759,15 +879,15 @@ void printHttpCode(int code) {
   Serial.println();
 }
 
-int httpsPost(const String &body) {
+int httpsPostTo(const String &url, const String &body) {
   WiFiClientSecure client;
   client.setInsecure();
   client.setHandshakeTimeout(20);
   HTTPClient http;
   http.setTimeout(20000);
   http.setReuse(false);
-  if (!http.begin(client, pushUrl)) {
-    Serial.println("PUSH begin fail");
+  if (!http.begin(client, url)) {
+    evt("push begin fail (bad url?)");
     return -1;
   }
   http.addHeader("X-API-Key", pushKey);
@@ -775,8 +895,23 @@ int httpsPost(const String &body) {
   const int code = http.POST(body);
   printHttpCode(code);
   http.end();
+  pushLastCode = code;
+  if (code >= 200 && code < 300) {
+    pushOkCount++;
+  } else {
+    pushFailCount++;
+    if (code < 0) {
+      evt("push FAIL %s rssi=%d body=%uB", HTTPClient::errorToString(code).c_str(),
+          WiFi.RSSI(), static_cast<unsigned>(body.length()));
+    } else {
+      evt("push FAIL http %d body=%uB", code,
+          static_cast<unsigned>(body.length()));
+    }
+  }
   return code;
 }
+
+int httpsPost(const String &body) { return httpsPostTo(pushUrl, body); }
 
 bool uploadRange(const char *path, uint32_t offset, size_t nbytes) {
   File f = FFat.open(path, FILE_READ);
@@ -831,6 +966,44 @@ void pushTest() {
                                              : "PUSH TEST fail");
 }
 
+// 기기 동작 로그도 NAS 로 올린다 (?kind=events). 한 번에 한 조각.
+bool pushEvents() {
+  File f = FFat.open(kEvtPath, FILE_READ);
+  if (!f) {
+    return true;
+  }
+  const uint32_t sz = f.size();
+  f.close();
+  if (evtSentOff > sz) {
+    evtSentOff = 0;
+  }
+  if (evtSentOff >= sz) {
+    return true;
+  }
+  const size_t n = (sz - evtSentOff) > kPushChunk ? kPushChunk : (sz - evtSentOff);
+  File src = FFat.open(kEvtPath, FILE_READ);
+  if (!src || !src.seek(evtSentOff)) {
+    return false;
+  }
+  String chunk;
+  chunk.reserve(n + 8);
+  while (chunk.length() < n && src.available()) {
+    chunk += static_cast<char>(src.read());
+  }
+  src.close();
+  String url = pushUrl;
+  url += (url.indexOf('?') >= 0) ? "&kind=events" : "?kind=events";
+  Serial.printf("PUSH events +%u %uB ...\n", static_cast<unsigned>(evtSentOff),
+                static_cast<unsigned>(chunk.length()));
+  const int code = httpsPostTo(url, chunk);
+  if (code < 200 || code >= 300) {
+    return false;
+  }
+  evtSentOff += chunk.length();
+  savePushPrefs();
+  return true;
+}
+
 bool pushMore() {
   flushLog();
   if (WiFi.status() != WL_CONNECTED) {
@@ -838,10 +1011,11 @@ bool pushMore() {
     return false;
   }
   if (!pushUrl.length() || !pushKey.length()) {
-    Serial.println("PUSH URL and PUSH KEY first");
+    evt("push skipped: PUSH URL / PUSH KEY not set");
     return false;
   }
 
+  pushEvents();
   int chunks = 0;
   while (chunks < kPushChunks) {
     if (sentSlot != logSlot) {
@@ -889,8 +1063,13 @@ bool pushMore() {
     savePushPrefs();
     chunks++;
   }
-  Serial.printf("PUSH caught up to %s @%u\n", activePath(),
-                static_cast<unsigned>(sentOff));
+  if (chunks) {
+    evt("push ok %d chunk(s) -> %s @%u", chunks, activePath(),
+        static_cast<unsigned>(sentOff));
+  } else {
+    Serial.printf("PUSH caught up to %s @%u\n", activePath(),
+                  static_cast<unsigned>(sentOff));
+  }
   return true;
 }
 
@@ -902,6 +1081,13 @@ void printHelp() {
   Serial.println("WIFI FORGET <ssid>  WIFI SCAN");
   Serial.println("PUSH URL <https://.../api/canlog>  PUSH KEY <api-key>");
   Serial.println("PUSH NOW  PUSH AUTO ON|OFF  PUSH TEST");
+  Serial.println("LOG (기기 동작 로그 최근)  LOG ALL  LOG CLEAR  CANA (A 진단)");
+}
+
+void printCanADiag() {
+  char buf[320];
+  describeCanA(buf, sizeof(buf), rateA);
+  Serial.println(buf);
 }
 
 void printStat() {
@@ -939,13 +1125,96 @@ void printStat() {
     }
     Serial.println();
   }
-  Serial.printf("push=%s  auto=%s  url=%s\n",
+  Serial.printf("push=%s  auto=%s  ok=%lu fail=%lu last=%d  url=%s\n",
                 (pushUrl.length() && pushKey.length()) ? "set" : "off",
                 pushAuto ? "on" : "off",
+                static_cast<unsigned long>(pushOkCount),
+                static_cast<unsigned long>(pushFailCount), pushLastCode,
                 pushUrl.length() ? pushUrl.c_str() : "-");
   char when[24];
   fillKst(when, sizeof(when));
-  Serial.printf("time=%s  ntp=%s\n", when, ntpOk ? "ok" : "wait");
+  Serial.printf("time=%s  ntp=%s  reset=%s  heap=%u\n", when,
+                ntpOk ? "ok" : "wait", resetReasonText(esp_reset_reason()),
+                static_cast<unsigned>(ESP.getFreeHeap()));
+  if (canAOk) {
+    printCanADiag();
+  } else {
+    Serial.println("A: init FAIL — CANA 로 진단");
+  }
+}
+
+// 1분마다 기기 상태 한 줄. 차에서 무슨 일이 있었는지 나중에 LOG 로 본다.
+void heartbeat() {
+  const uint32_t a = framesA;
+  const uint32_t b = framesB;
+  const uint32_t dA = a - hbMarkA;
+  const uint32_t dB = b - hbMarkB;
+  hbMarkA = a;
+  hbMarkB = b;
+  const bool sta = wifiKind == WIFI_KIND_STA && WiFi.status() == WL_CONNECTED;
+  evt("hb A+%lu B+%lu drop=%lu Bmiss=%lu log=%s:%u wifi=%s ssid=%s rssi=%d "
+      "push=%s ok=%lu fail=%lu last=%d heap=%u",
+      static_cast<unsigned long>(dA), static_cast<unsigned long>(dB),
+      static_cast<unsigned long>(dropped), static_cast<unsigned long>(twaiMissed),
+      activePath(),
+      static_cast<unsigned>(logFile ? logFile.size() + lineUsed : 0),
+      wifiOn ? (sta ? "sta" : (staSearching ? "search" : "ap")) : "off",
+      sta ? staSsid.c_str() : "-", sta ? WiFi.RSSI() : 0,
+      pushAuto ? "auto" : "off", static_cast<unsigned long>(pushOkCount),
+      static_cast<unsigned long>(pushFailCount), pushLastCode,
+      static_cast<unsigned>(ESP.getFreeHeap()));
+  char buf[320];
+  describeCanA(buf, sizeof(buf), dA);
+  evt("%s", buf);
+}
+
+void streamEventsToSerial(bool all) {
+  File f = FFat.open(kEvtPath, FILE_READ);
+  if (!f) {
+    Serial.println("(기기 동작 로그 없음)");
+    return;
+  }
+  if (!all && f.size() > 6000) {
+    f.seek(f.size() - 6000);
+    // 잘린 첫 줄은 버림
+    while (f.available() && f.read() != '\n') {
+    }
+  }
+  uint8_t buf[256];
+  while (f.available()) {
+    const int n = f.read(buf, sizeof(buf));
+    if (n > 0) {
+      Serial.write(buf, n);
+    }
+  }
+  f.close();
+}
+
+void dumpEvents(bool all) {
+  Serial.println("---EVT-BEGIN---");
+  if (all) {
+    File old = FFat.open(kEvtOld, FILE_READ);
+    if (old) {
+      uint8_t buf[256];
+      while (old.available()) {
+        const int n = old.read(buf, sizeof(buf));
+        if (n > 0) {
+          Serial.write(buf, n);
+        }
+      }
+      old.close();
+    }
+  }
+  streamEventsToSerial(all);
+  Serial.println("---EVT-END---");
+}
+
+void clearEvents() {
+  FFat.remove(kEvtOld);
+  FFat.remove(kEvtPath);
+  evtSentOff = 0;
+  savePushPrefs();
+  evt("event log cleared");
 }
 
 void streamFileToSerial(const char *path) {
@@ -988,7 +1257,7 @@ void clearLogs() {
   framesB = 0;
   dropped = 0;
   openLog();
-  Serial.println("logs cleared");
+  evt("can logs cleared");
 }
 
 static String skipWord(const String &s) {
@@ -1024,6 +1293,14 @@ void handleSerial() {
     dumpFiles();
   } else if (cmd == "CLEAR") {
     clearLogs();
+  } else if (cmd == "LOG") {
+    dumpEvents(false);
+  } else if (cmd == "LOG ALL") {
+    dumpEvents(true);
+  } else if (cmd == "LOG CLEAR") {
+    clearEvents();
+  } else if (cmd == "CANA") {
+    printCanADiag();
   } else if (cmd == "ECHO ON") {
     echoSerial = true;
     Serial.println("echo ON");
@@ -1091,19 +1368,20 @@ void handleSerial() {
 
 bool startCanA() {
   if (!canA.begin(CANFD::BITRATE(500000, 1))) {
-    Serial.println("CAN A init FAIL  (MCP2518FD)");
+    evt("CAN A init FAIL (MCP2518FD not in listen-only / no SPI reply)");
+    printCanADiag();
     return false;
   }
-  Serial.println("CAN A MCP2518FD listen-only 500k OK  (X437 9/10)");
+  evt("CAN A MCP2518FD listen-only 500k OK (X437 9/10)");
   return true;
 }
 
 bool startCanB() {
   if (!canB.begin(CAN0_BITRATE)) {
-    Serial.println("CAN B init FAIL  (TWAI)");
+    evt("CAN B init FAIL (TWAI)");
     return false;
   }
-  Serial.println("CAN B TWAI listen-only 500k OK  (X437 13/14)");
+  evt("CAN B TWAI listen-only 500k OK (X437 13/14)");
   return true;
 }
 
@@ -1175,7 +1453,8 @@ void tickCanRate(uint32_t now) {
     canB.stats(twaiMissed, twaiOverrun, q);
     if (canB.recover()) {
       twaiRecovered++;
-      Serial.println("CAN B recovered");
+      evt("CAN B bus-off -> recovered (%lu)",
+          static_cast<unsigned long>(twaiRecovered));
     }
   }
 }
@@ -1202,11 +1481,15 @@ void setup() {
                   static_cast<unsigned>(FFat.totalBytes()));
     openLog();
   }
+  loadWifiPrefs();
+  evt("boot reset=%s fw=%s %s ffat_free=%u psram=%u",
+      resetReasonText(esp_reset_reason()), __DATE__, __TIME__,
+      static_cast<unsigned>(FFat.freeBytes()),
+      static_cast<unsigned>(ESP.getPsramSize()));
 
   canAOk = startCanA();
   canBOk = startCanB();
   startCanTask();
-  loadWifiPrefs();
   printWifiList();
   if (wifiOn) {
     startWifi();
@@ -1232,6 +1515,10 @@ void loop() {
     rotateIfNeeded();
   }
   tickCanRate(now);
+  if (now - lastHbMs >= kHbEveryMs) {
+    lastHbMs = now;
+    heartbeat();
+  }
   if (wifiOn && wantSta && staNetCount) {
     if (staLinked()) {
       staNoLinkMs = 0;
@@ -1261,7 +1548,8 @@ void loop() {
           lastWifiCheck = now;
           ntpStarted = false;
           ntpOk = false;
-          Serial.println("STA lost — AP stays up, searching all saved Wi-Fi");
+          evt("sta lost %s (status=%d) — AP stays up, searching", staSsid.c_str(),
+              static_cast<int>(WiFi.status()));
           printStaSearchTargets();
         } else if (!staSearching) {
           staSearching = true;

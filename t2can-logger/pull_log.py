@@ -76,6 +76,46 @@ def pull(port: str, out: Path, baud: int) -> None:
     print(f"저장: {out.resolve()}  ({len(lines)} 줄)")
 
 
+def pull_events(port: str, out: Path, baud: int) -> None:
+    """기기 동작 로그(부팅·Wi-Fi·PUSH·CAN A 진단)를 받습니다."""
+    print("포트 여는 중...")
+    ser = serial.Serial(port, baud, timeout=1)
+    time.sleep(4.0)
+    ser.reset_input_buffer()
+    print("LOG ALL 요청")
+    ser.write(b"LOG ALL\n")
+    ser.flush()
+
+    collecting = False
+    lines: list[str] = []
+    last_data = time.time()
+    while True:
+        raw = ser.readline()
+        if not raw:
+            if time.time() - last_data > (8 if collecting else 20):
+                print("응답이 멎었습니다. 받은 줄만 저장합니다.")
+                break
+            continue
+        text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+        last_data = time.time()
+        if text == "---EVT-BEGIN---":
+            collecting = True
+            lines.clear()
+            continue
+        if text == "---EVT-END---":
+            break
+        if collecting:
+            lines.append(text)
+    ser.close()
+    out.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    print(f"저장: {out.resolve()}  ({len(lines)} 줄)")
+    tail = lines[-15:]
+    if tail:
+        print("--- 마지막 15줄 ---")
+        for line in tail:
+            print(line)
+
+
 def live(port: str, out: Path, baud: int) -> None:
     ser = serial.Serial(port, baud, timeout=1)
     time.sleep(2.0)
@@ -118,13 +158,23 @@ def main() -> None:
         action="store_true",
         help="보드에 쌓인 파일 대신, USB 로 들어오는 프레임을 바로 저장",
     )
+    parser.add_argument(
+        "--events",
+        action="store_true",
+        help="CAN 대신 기기 동작 로그(부팅·Wi-Fi·PUSH·CAN A 진단)를 받음",
+    )
     args = parser.parse_args()
 
     port = pick_port(args.port)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    out = Path(args.out) if args.out else Path(f"canlog-{stamp}.csv")
+    if args.events:
+        out = Path(args.out) if args.out else Path(f"t2can-events-{stamp}.log")
+    else:
+        out = Path(args.out) if args.out else Path(f"canlog-{stamp}.csv")
     print(f"포트 {port}")
-    if args.live:
+    if args.events:
+        pull_events(port, out, args.baud)
+    elif args.live:
         live(port, out, args.baud)
     else:
         pull(port, out, args.baud)

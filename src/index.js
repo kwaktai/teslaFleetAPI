@@ -19,7 +19,14 @@ import { clearOwnerTokens, ownerLinked, saveOwnerTokens } from './ownerStore.js'
 import { readVehicleData, readVehicleList, requestWake } from './reads.js';
 import { clearUsage, monthKey, snapshot } from './usage.js';
 import { aliasEntries, resolveVehicle } from './vehicles.js';
-import { readDay, readLatest, renderCanlogPage, saveCanlog } from './canlog.js';
+import {
+  readDay,
+  readEvents,
+  readLatest,
+  renderCanlogPage,
+  saveCanlog,
+  saveEvents,
+} from './canlog.js';
 import { ensureKeys, publicKeyPath } from './keys.js';
 import { loadTokens, clearTokens } from './tokenStore.js';
 import {
@@ -485,6 +492,14 @@ app.get('/canlog', (_req, res) => {
 
 app.get('/api/canlog', (req, res) => {
   const day = typeof req.query.day === 'string' ? req.query.day : '';
+  if (req.query.kind === 'events') {
+    const text = readEvents(day);
+    if (!text) {
+      return res.status(404).type('text/plain; charset=utf-8').send('아직 기기 동작 로그가 없습니다.');
+    }
+    res.set('Content-Disposition', `attachment; filename="t2can-events-${day || 'latest'}.log"`);
+    return res.type('text/plain; charset=utf-8').send(text);
+  }
   const csv = day ? readDay(day) : readLatest();
   if (!csv) {
     return res.status(404).type('text/plain; charset=utf-8').send('아직 업로드된 로그가 없습니다.');
@@ -502,7 +517,7 @@ app.post(
     if (!body.trim()) {
       return res.status(400).json({ error: 'empty log' });
     }
-    const meta = saveCanlog(body);
+    const meta = req.query.kind === 'events' ? saveEvents(body) : saveCanlog(body);
     res.json({ ok: true, ...meta });
   }
 );
