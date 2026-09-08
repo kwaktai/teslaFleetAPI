@@ -3,6 +3,7 @@
  *
  * Vehicle CAN (A) + Chassis CAN (B) 을 듣기만 하고
  * 보드 플래시(FFat)에 CSV 로 저장합니다. 송신하지 않습니다.
+ * CAN 채널 구현은 https://github.com/chlsw88/T-CAN2 를 참고했습니다.
  *
  * 나중에 PC/폰에서 꺼내는 방법:
  *   1) USB 시리얼 — 아래 명령 또는 pull_log.py
@@ -25,8 +26,9 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <time.h>
-#include "driver/twai.h"
-#include "mcp2518fd_can.h"
+#include "pin_config.h"
+#include "TwaiChannel.h"
+#include "Mcp2518fdChannel.h"
 
 // 차 안 Wi-Fi. ESP32-S3 는 2.4GHz 만 됩니다. 이름이 5G 여도 2.4GHz 가
 // 같은 SSID 로 나와야 붙습니다. 암호를 여기에 넣거나, 시리얼에서
@@ -50,13 +52,6 @@ struct StaNet {
   String pass;
 };
 
-#define MCP2518_CS 10
-#define MCP2518_SCLK 12
-#define MCP2518_MOSI 11
-#define MCP2518_MISO 13
-#define CAN2_TX GPIO_NUM_7
-#define CAN2_RX GPIO_NUM_6
-
 static const char *kLog0 = "/canlog0.csv";
 static const char *kLog1 = "/canlog1.csv";
 static const size_t kRotateBytes = 3UL * 1024UL * 1024UL;
@@ -65,7 +60,9 @@ static const size_t kBufBytes = 4096;
 static const char *kApSsid = "T2CAN-LOG";
 static const char *kApPass = "teslalog1";
 
-mcp2518fd CanA(MCP2518_CS);
+Mcp2518fdChannel canA(MCP2518_CS_PIN, SPI_SCLK_PIN, SPI_MISO_PIN, SPI_MOSI_PIN,
+                      MCP2518_INT_PIN);
+TwaiChannel canB(CAN0_TX_PIN, CAN0_RX_PIN);
 WebServer http(80);
 Preferences prefs;
 
@@ -78,6 +75,11 @@ size_t lineUsed = 0;
 
 uint32_t framesA = 0;
 uint32_t framesB = 0;
+uint32_t rateA = 0;
+uint32_t rateB = 0;
+uint32_t rateAAcc = 0;
+uint32_t rateBAcc = 0;
+uint32_t lastRateMs = 0;
 uint32_t dropped = 0;
 uint32_t lastStatMs = 0;
 uint32_t lastWifiCheck = 0;
@@ -370,7 +372,7 @@ void maybeNtp() {
 void logFrame(char bus, uint32_t id, uint8_t len, const uint8_t *data) {
   char when[24];
   fillKst(when, sizeof(when));
-  char line[128];
+  char line[256];
   int pos = snprintf(line, sizeof(line), "%s,%lu,%c,%03lX,%u,", when,
                      static_cast<unsigned long>(millis()), bus,
                      static_cast<unsigned long>(id), len);
@@ -868,6 +870,11 @@ void printStat() {
                 canBOk ? "ok" : "fail", static_cast<unsigned long>(framesB),
                 static_cast<unsigned long>(dropped), activePath(),
                 static_cast<unsigned>(logFile ? logFile.size() + lineUsed : 0));
+  Serial.printf("rateA=%lu/5s %s  rateB=%lu/5s %s\n",
+                static_cast<unsigned long>(rateA),
+                rateA ? "통신중" : "응답없음",
+                static_cast<unsigned long>(rateB),
+                rateB ? "통신중" : "응답없음");
   Serial.printf("wifi=%s  ip=%s  ssid=%s  saved=%u  search=%s\n",
                 wifiOn ? ((wifiKind == WIFI_KIND_STA) ? "sta" : "ap") : "off",
                 currentWifiIp().c_str(),
@@ -1035,59 +1042,51 @@ void handleSerial() {
 }
 
 bool startCanA() {
-  SPI.begin(MCP2518_SCLK, MCP2518_MISO, MCP2518_MOSI, MCP2518_CS);
-  CanA.setMode(CAN_LISTEN_ONLY_MODE);
-  if (CanA.begin(CANFD::BITRATE(500000, 1)) != CAN_OK) {
-    Serial.println("CAN A init FAIL");
+  if (!canA.begin(CANFD::BITRATE(500000, 1))) {
+    Serial.println("CAN A init FAIL  (MCP2518FD)");
     return false;
   }
-  Serial.println("CAN A listen-only 500k OK");
+  Serial.println("CAN A MCP2518FD listen-only 500k OK  (X437 9/10)");
   return true;
 }
 
 bool startCanB() {
-  twai_general_config_t g =
-      TWAI_GENERAL_CONFIG_DEFAULT(CAN2_TX, CAN2_RX, TWAI_MODE_LISTEN_ONLY);
-  twai_timing_config_t t = TWAI_TIMING_CONFIG_500KBITS();
-  twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-  if (twai_driver_install(&g, &t, &f) != ESP_OK) {
-    Serial.println("CAN B install FAIL");
+  if (!canB.begin(CAN0_BITRATE)) {
+    Serial.println("CAN B init FAIL  (TWAI)");
     return false;
   }
-  if (twai_start() != ESP_OK) {
-    Serial.println("CAN B start FAIL");
-    return false;
-  }
-  Serial.println("CAN B listen-only 500k OK");
+  Serial.println("CAN B TWAI listen-only 500k OK  (X437 13/14)");
   return true;
 }
 
-void pollCanA() {
-  if (!canAOk) {
+void pollOne(CanChannel &ch, bool ok, char bus, uint32_t &total, uint32_t &acc) {
+  if (!ok) {
     return;
   }
+  CanFrame f;
   uint8_t safety = 0;
-  while (CanA.checkReceive() == CAN_MSGAVAIL && safety < 32) {
-    uint8_t len = 0;
-    uint8_t buf[64];
-    CanA.readMsgBuf(&len, buf);
-    logFrame('A', CanA.getCanId(), len, buf);
-    framesA++;
+  while (safety < 32 && ch.receive(f)) {
+    if (!f.rtr) {
+      logFrame(bus, f.id, f.len, f.data);
+      total++;
+      acc++;
+    }
     safety++;
   }
 }
 
-void pollCanB() {
-  if (!canBOk) {
+void pollCanA() { pollOne(canA, canAOk, 'A', framesA, rateAAcc); }
+void pollCanB() { pollOne(canB, canBOk, 'B', framesB, rateBAcc); }
+
+void tickCanRate(uint32_t now) {
+  if (now - lastRateMs < 5000) {
     return;
   }
-  twai_message_t msg;
-  uint8_t safety = 0;
-  while (twai_receive(&msg, 0) == ESP_OK && safety < 32) {
-    logFrame('B', msg.identifier, msg.data_length_code, msg.data);
-    framesB++;
-    safety++;
-  }
+  lastRateMs = now;
+  rateA = rateAAcc;
+  rateB = rateBAcc;
+  rateAAcc = 0;
+  rateBAcc = 0;
 }
 
 void setup() {
@@ -1096,6 +1095,8 @@ void setup() {
   delay(1500);
   Serial.println();
   Serial.println("T-2CAN FD logger  listen-only");
+  Serial.println("CAN A = MCP2518FD (9/10)  CAN B = TWAI (13/14)");
+  Serial.println("CAN stack from chlsw88/T-CAN2  — no TX");
   printHelp();
 
   if (!FFat.begin(false)) {
@@ -1134,6 +1135,7 @@ void loop() {
     flushLog();
     rotateIfNeeded();
   }
+  tickCanRate(now);
   if (wifiOn && wantSta && staNetCount) {
     if (staLinked()) {
       staNoLinkMs = 0;

@@ -38,7 +38,9 @@ bash t2can-logger/update-from-github.sh
 
 `mcp2518fd_can.h` 는 `Arduino/libraries/Longan_CANFD` 가 있어야 합니다.
 
-시리얼 115200 에서 `CAN A listen-only 500k OK` 가 보이면 됩니다.
+시리얼 115200 에서 `CAN A MCP2518FD listen-only 500k OK` 가 보이면 됩니다.
+
+CAN 수신은 [chlsw88/T-CAN2](https://github.com/chlsw88/T-CAN2) 채널 구조를 참고했습니다. **송신은 하지 않습니다.** `STAT`의 `rateA`/`rateB`는 최근 5초 프레임 수입니다.
 
 ## 차 연결 (A+B)
 
