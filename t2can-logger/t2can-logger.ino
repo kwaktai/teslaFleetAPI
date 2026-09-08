@@ -81,6 +81,8 @@ uint32_t framesB = 0;
 uint32_t dropped = 0;
 uint32_t lastStatMs = 0;
 uint32_t lastWifiCheck = 0;
+uint32_t staGotLinkMs = 0;
+uint32_t staNoLinkMs = 0;
 uint32_t lastPushMs = 0;
 uint32_t sentOff = 0;
 uint8_t sentSlot = 0;
@@ -105,6 +107,8 @@ String pushUrl;
 String pushKey;
 
 static const uint32_t kStaSearchEveryMs = 10UL * 1000UL;
+static const uint32_t kStaHoldMs = 8UL * 1000UL;
+static const uint32_t kStaLostConfirmMs = 4UL * 1000UL;
 static const uint32_t kPushEveryMs = 60UL * 1000UL;
 static const size_t kPushChunk = 48UL * 1024UL;
 static const int kPushChunks = 4;
@@ -542,12 +546,18 @@ void printStaSearchTargets() {
   Serial.println(" — connect to stop");
 }
 
+bool staLinked() { return WiFi.status() == WL_CONNECTED; }
+
 void beginStaJoin() {
   if (!staSearching || !staNetCount) {
     return;
   }
-  if (WiFi.status() == WL_CONNECTED) {
+  if (staLinked()) {
     staSearching = false;
+    return;
+  }
+  const int st = WiFi.status();
+  if (st == WL_IDLE_STATUS) {
     return;
   }
   selectStaTarget();
@@ -588,6 +598,8 @@ void startWifi() {
   WiFi.disconnect(true);
   WiFi.persistent(false);
   staAnnounced = false;
+  staGotLinkMs = 0;
+  staNoLinkMs = 0;
   staSearching = wantSta && staNetCount;
   if (staSearching) {
     WiFi.mode(WIFI_AP_STA);
@@ -613,6 +625,8 @@ void stopWifi() {
   WiFi.mode(WIFI_OFF);
   staSearching = false;
   staAnnounced = false;
+  staGotLinkMs = 0;
+  staNoLinkMs = 0;
   Serial.println("Wi-Fi OFF");
 }
 
@@ -1121,30 +1135,44 @@ void loop() {
     rotateIfNeeded();
   }
   if (wifiOn && wantSta && staNetCount) {
-    if (WiFi.status() == WL_CONNECTED) {
+    if (staLinked()) {
+      staNoLinkMs = 0;
+      if (!staGotLinkMs) {
+        staGotLinkMs = now;
+      }
       if (staSearching) {
         staSearching = false;
       }
       announceSta();
       maybeNtp();
+    } else if (staGotLinkMs && now - staGotLinkMs < kStaHoldMs) {
+      // DHCP/mDNS 직후 status 가 잠깐 흔들려도 검색하지 않음
     } else {
-      if (staAnnounced) {
-        staAnnounced = false;
-        staSearching = true;
-        wifiKind = WIFI_KIND_AP;
-        MDNS.end();
-        lastWifiCheck = 0;
-        ntpStarted = false;
-        ntpOk = false;
-        Serial.println("STA lost — AP stays up, searching all saved Wi-Fi");
-        printStaSearchTargets();
-      } else if (!staSearching) {
-        staSearching = true;
+      if (!staNoLinkMs) {
+        staNoLinkMs = now;
       }
-      if (staSearching &&
-          (lastWifiCheck == 0 || now - lastWifiCheck >= kStaSearchEveryMs)) {
-        lastWifiCheck = now;
-        beginStaJoin();
+      if (now - staNoLinkMs < kStaLostConfirmMs) {
+        // 몇 초 더 끊긴 뒤에만 재검색
+      } else {
+        if (staAnnounced) {
+          staAnnounced = false;
+          staSearching = true;
+          staGotLinkMs = 0;
+          wifiKind = WIFI_KIND_AP;
+          MDNS.end();
+          lastWifiCheck = now;
+          ntpStarted = false;
+          ntpOk = false;
+          Serial.println("STA lost — AP stays up, searching all saved Wi-Fi");
+          printStaSearchTargets();
+        } else if (!staSearching) {
+          staSearching = true;
+        }
+        if (staSearching &&
+            (lastWifiCheck == 0 || now - lastWifiCheck >= kStaSearchEveryMs)) {
+          lastWifiCheck = now;
+          beginStaJoin();
+        }
       }
     }
   }
