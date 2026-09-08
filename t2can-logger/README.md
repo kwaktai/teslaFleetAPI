@@ -21,11 +21,20 @@
 
 코드를 최신으로 받을 때는 폴더를 바꾸지 말고 덮어쓰세요. Arduino IDE는 닫고:
 
+Windows (이 폴더에서 PowerShell):
+
+```bat
+cd C:\Users\taikwak\Documents\Arduino\2CAN_FD\teslaFleetAPI-cursor-t2can-can-logger-5292\t2can-logger
+powershell -ExecutionPolicy Bypass -File .\update-from-github.ps1
+```
+
+맥:
+
 ```sh
 bash t2can-logger/update-from-github.sh
 ```
 
-맥에서 대상 폴더가 다르면 경로를 인자로 줍니다. `canlog-*.csv`, `data/`, `.env` 는 지우지 않습니다.
+대상이 다르면 경로를 인자로 줍니다. 저장소 루트를 덮어씁니다. `t2can-logger`만 넘기면 위를 씁니다. `canlog-*.csv`, `data/`, `.env` 는 지우지 않습니다.
 
 `mcp2518fd_can.h` 는 `Arduino/libraries/Longan_CANFD` 가 있어야 합니다.
 

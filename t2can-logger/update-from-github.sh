@@ -4,8 +4,28 @@
 set -euo pipefail
 
 BRANCH="cursor/t2can-can-logger-5292"
-DEFAULT_TARGET="${HOME}/Taicloud/Documents/임시/2CAN_FD/teslaFleetAPI-cursor-t2can-can-logger-5292"
-TARGET="${1:-${T2CAN_DIR:-$DEFAULT_TARGET}}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_FROM_SCRIPT="$(cd "$SCRIPT_DIR/.." && pwd)"
+WIN_TARGET="/c/Users/taikwak/Documents/Arduino/2CAN_FD/teslaFleetAPI-cursor-t2can-can-logger-5292"
+MAC_TARGET="${HOME}/Taicloud/Documents/임시/2CAN_FD/teslaFleetAPI-cursor-t2can-can-logger-5292"
+
+if [[ -n "${1:-}" ]]; then
+  TARGET="$1"
+elif [[ -n "${T2CAN_DIR:-}" ]]; then
+  TARGET="$T2CAN_DIR"
+elif [[ -d "$WIN_TARGET" ]]; then
+  TARGET="$WIN_TARGET"
+elif [[ -d "$MAC_TARGET" ]]; then
+  TARGET="$MAC_TARGET"
+else
+  TARGET="$REPO_FROM_SCRIPT"
+fi
+
+# t2can-logger 폴더를 넘기면 그 위(저장소 루트)를 씁니다.
+if [[ -f "$TARGET/t2can-logger.ino" && ! -f "$TARGET/t2can-logger/t2can-logger.ino" ]]; then
+  TARGET="$(cd "$TARGET/.." && pwd)"
+fi
+
 URL="https://github.com/kwaktai/teslaFleetAPI/archive/refs/heads/${BRANCH}.zip"
 
 if [[ ! -d "$TARGET" ]]; then
