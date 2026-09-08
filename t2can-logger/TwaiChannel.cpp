@@ -5,8 +5,10 @@ bool TwaiChannel::begin(uint32_t bitrate) {
   twai_general_config_t g =
       TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)_tx, (gpio_num_t)_rx,
                                   TWAI_MODE_LISTEN_ONLY);
-  g.tx_queue_len = 16;
-  g.rx_queue_len = 32;
+  g.tx_queue_len = 0;
+  // Tesla Chassis 는 초당 400프레임 이상. 플래시 쓰기/Wi-Fi 로 잠깐 멈춰도
+  // 잃지 않도록 크게 잡는다.
+  g.rx_queue_len = 512;
 
   twai_timing_config_t t;
   switch (bitrate) {
@@ -45,4 +47,31 @@ bool TwaiChannel::receive(CanFrame &out) {
     out.data[i] = m.data[i];
   }
   return true;
+}
+
+bool TwaiChannel::stats(uint32_t &rxMissed, uint32_t &rxOverrun,
+                        uint32_t &queued) {
+  twai_status_info_t st;
+  if (twai_get_status_info(&st) != ESP_OK) {
+    return false;
+  }
+  rxMissed = st.rx_missed_count;
+  rxOverrun = st.rx_overrun_count;
+  queued = st.msgs_to_rx;
+  return true;
+}
+
+bool TwaiChannel::recover() {
+  twai_status_info_t st;
+  if (twai_get_status_info(&st) != ESP_OK) {
+    return false;
+  }
+  if (st.state == TWAI_STATE_BUS_OFF) {
+    twai_initiate_recovery();
+    return true;
+  }
+  if (st.state == TWAI_STATE_STOPPED) {
+    return twai_start() == ESP_OK;
+  }
+  return false;
 }

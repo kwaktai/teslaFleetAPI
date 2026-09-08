@@ -42,6 +42,8 @@ bash t2can-logger/update-from-github.sh
 
 CAN 수신은 [chlsw88/T-CAN2](https://github.com/chlsw88/T-CAN2) 채널 구조를 참고했습니다. **송신은 하지 않습니다.** `STAT`의 `rateA`/`rateB`는 최근 5초 프레임 수입니다.
 
+수신은 별도 태스크가 하고, 줄은 PSRAM 큐(512KB)에 쌓인 뒤 플래시로 갑니다. Wi-Fi 스캔이나 NAS 업로드로 메인 루프가 몇 초 멈춰도 프레임을 잃지 않습니다. `STAT`의 `B missed`가 0이 아니면 그래도 놓친 겁니다.
+
 ## 차 연결 (A+B)
 
 DIP 종단은 **OFF**. 섹시커맨더는 뽑지 말고 Y분기.

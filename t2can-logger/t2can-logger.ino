@@ -26,6 +26,9 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <time.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/message_buffer.h"
+#include "freertos/task.h"
 #include "pin_config.h"
 #include "TwaiChannel.h"
 #include "Mcp2518fdChannel.h"
@@ -73,14 +76,23 @@ uint8_t logSlot = 0;
 char lineBuf[kBufBytes];
 size_t lineUsed = 0;
 
-uint32_t framesA = 0;
-uint32_t framesB = 0;
+// CAN 수신은 별도 태스크(core 1, 높은 우선순위)가 한다. Wi-Fi 스캔이나
+// HTTPS PUSH 로 loop() 가 몇 초 멈춰도 프레임을 잃지 않게 하기 위함.
+// 태스크 → 메시지 버퍼(한 줄 = 한 메시지) → loop() 가 플래시에 쓴다.
+volatile uint32_t framesA = 0;
+volatile uint32_t framesB = 0;
+volatile uint32_t dropped = 0;
 uint32_t rateA = 0;
 uint32_t rateB = 0;
-uint32_t rateAAcc = 0;
-uint32_t rateBAcc = 0;
+uint32_t rateMarkA = 0;
+uint32_t rateMarkB = 0;
 uint32_t lastRateMs = 0;
-uint32_t dropped = 0;
+uint32_t twaiMissed = 0;
+uint32_t twaiOverrun = 0;
+uint32_t twaiRecovered = 0;
+MessageBufferHandle_t canQueue = nullptr;
+size_t canQueueBytes = 0;
+TaskHandle_t canTaskHandle = nullptr;
 uint32_t lastStatMs = 0;
 uint32_t lastWifiCheck = 0;
 uint32_t staGotLinkMs = 0;
@@ -392,9 +404,37 @@ void logFrame(char bus, uint32_t id, uint8_t len, const uint8_t *data) {
     return;
   }
 
-  appendLine(line);
-  if (echoSerial) {
-    Serial.print(line);
+  if (!canQueue) {
+    appendLine(line);
+    if (echoSerial) {
+      Serial.print(line);
+    }
+    return;
+  }
+  const size_t n = static_cast<size_t>(pos);
+  // 부분 쓰기는 줄을 깨뜨리므로 자리가 있을 때만 넣는다.
+  if (xMessageBufferSpacesAvailable(canQueue) < n + 4 ||
+      xMessageBufferSend(canQueue, line, n, 0) != n) {
+    dropped++;
+  }
+}
+
+// loop() 쪽. 태스크가 쌓은 줄을 플래시 버퍼로 옮긴다.
+void drainCanQueue() {
+  if (!canQueue) {
+    return;
+  }
+  char line[256];
+  for (int k = 0; k < 512; k++) {
+    const size_t n = xMessageBufferReceive(canQueue, line, sizeof(line) - 1, 0);
+    if (!n) {
+      break;
+    }
+    line[n] = 0;
+    appendLine(line);
+    if (echoSerial) {
+      Serial.print(line);
+    }
   }
 }
 
@@ -875,6 +915,12 @@ void printStat() {
                 rateA ? "통신중" : "응답없음",
                 static_cast<unsigned long>(rateB),
                 rateB ? "통신중" : "응답없음");
+  Serial.printf("rx task=%s  queue=%uKB  B missed=%lu overrun=%lu recovered=%lu\n",
+                canTaskHandle ? "on" : "off",
+                static_cast<unsigned>(canQueueBytes / 1024),
+                static_cast<unsigned long>(twaiMissed),
+                static_cast<unsigned long>(twaiOverrun),
+                static_cast<unsigned long>(twaiRecovered));
   Serial.printf("wifi=%s  ip=%s  ssid=%s  saved=%u  search=%s\n",
                 wifiOn ? ((wifiKind == WIFI_KIND_STA) ? "sta" : "ap") : "off",
                 currentWifiIp().c_str(),
@@ -938,7 +984,9 @@ void clearLogs() {
   FFat.remove(kLog0);
   FFat.remove(kLog1);
   logSlot = 0;
-  framesA = framesB = dropped = 0;
+  framesA = 0;
+  framesB = 0;
+  dropped = 0;
   openLog();
   Serial.println("logs cleared");
 }
@@ -1059,34 +1107,77 @@ bool startCanB() {
   return true;
 }
 
-void pollOne(CanChannel &ch, bool ok, char bus, uint32_t &total, uint32_t &acc) {
+bool pollOne(CanChannel &ch, bool ok, char bus, volatile uint32_t &total) {
   if (!ok) {
-    return;
+    return false;
   }
   CanFrame f;
-  uint8_t safety = 0;
-  while (safety < 32 && ch.receive(f)) {
-    if (!f.rtr) {
-      logFrame(bus, f.id, f.len, f.data);
-      total++;
-      acc++;
+  bool got = false;
+  for (uint8_t safety = 0; safety < 64 && ch.receive(f); safety++) {
+    got = true;
+    if (f.rtr) {
+      continue;
     }
-    safety++;
+    logFrame(bus, f.id, f.len, f.data);
+    total = total + 1;
+  }
+  return got;
+}
+
+void canTask(void *) {
+  for (;;) {
+    const bool gotB = pollOne(canB, canBOk, 'B', framesB);
+    const bool gotA = pollOne(canA, canAOk, 'A', framesA);
+    if (!gotA && !gotB) {
+      vTaskDelay(1);
+    }
   }
 }
 
-void pollCanA() { pollOne(canA, canAOk, 'A', framesA, rateAAcc); }
-void pollCanB() { pollOne(canB, canBOk, 'B', framesB, rateBAcc); }
+void startCanTask() {
+  size_t want = 512UL * 1024UL;
+  uint8_t *store = nullptr;
+  if (psramFound()) {
+    store = static_cast<uint8_t *>(ps_malloc(want));
+  }
+  if (!store) {
+    want = 64UL * 1024UL;
+    store = static_cast<uint8_t *>(malloc(want));
+  }
+  if (store) {
+    static StaticMessageBuffer_t ctl;
+    canQueue = xMessageBufferCreateStatic(want, store, &ctl);
+    canQueueBytes = want;
+  }
+  if (!canQueue) {
+    Serial.println("CAN queue alloc FAIL — polling in loop()");
+    return;
+  }
+  xTaskCreatePinnedToCore(canTask, "can-rx", 6144, nullptr, 3, &canTaskHandle,
+                          1);
+  Serial.printf("CAN rx task on core 1, queue %u KB\n",
+                static_cast<unsigned>(canQueueBytes / 1024));
+}
 
 void tickCanRate(uint32_t now) {
   if (now - lastRateMs < 5000) {
     return;
   }
   lastRateMs = now;
-  rateA = rateAAcc;
-  rateB = rateBAcc;
-  rateAAcc = 0;
-  rateBAcc = 0;
+  const uint32_t a = framesA;
+  const uint32_t b = framesB;
+  rateA = a - rateMarkA;
+  rateB = b - rateMarkB;
+  rateMarkA = a;
+  rateMarkB = b;
+  if (canBOk) {
+    uint32_t q = 0;
+    canB.stats(twaiMissed, twaiOverrun, q);
+    if (canB.recover()) {
+      twaiRecovered++;
+      Serial.println("CAN B recovered");
+    }
+  }
 }
 
 void setup() {
@@ -1114,6 +1205,7 @@ void setup() {
 
   canAOk = startCanA();
   canBOk = startCanB();
+  startCanTask();
   loadWifiPrefs();
   printWifiList();
   if (wifiOn) {
@@ -1122,8 +1214,12 @@ void setup() {
 }
 
 void loop() {
-  pollCanA();
-  pollCanB();
+  if (canTaskHandle) {
+    drainCanQueue();
+  } else {
+    pollOne(canB, canBOk, 'B', framesB);
+    pollOne(canA, canAOk, 'A', framesA);
+  }
   handleSerial();
   if (wifiOn) {
     http.handleClient();
