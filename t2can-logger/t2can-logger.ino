@@ -15,6 +15,11 @@
  *   WIFI ON|OFF  WIFI AP  WIFI JOIN <ssid> <pass>  WIFI LIST
  *   WIFI FORGET <ssid>  WIFI SCAN
  *   PUSH URL  PUSH KEY  PUSH NOW  PUSH AUTO ON|OFF
+ *   LOG  LOG RATE <ms>  CANA  FS  FORMAT
+ *
+ * 구조: can-rx 태스크(core 1) 수신 → ID 별 간격 제한 → PSRAM 큐 →
+ *       loop() 이 32KB 씩 플래시에 쓰고 5초마다 sync
+ *       push 태스크(core 0) 가 NAS 로 올림 (loop 를 막지 않음)
  */
 
 #include <SPI.h>
@@ -31,6 +36,7 @@
 #include "esp_core_dump.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/message_buffer.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "pin_config.h"
 #include "TwaiChannel.h"
@@ -61,7 +67,16 @@ struct StaNet {
 static const char *kLog0 = "/canlog0.csv";
 static const char *kLog1 = "/canlog1.csv";
 static const size_t kRotateBytes = 3UL * 1024UL * 1024UL;
-static const size_t kBufBytes = 4096;
+// 플래시는 4KB 섹터 단위로 지우고 쓴다. 4KB 마다 write+sync 를 하면 데이터
+// 섹터 + FAT + 디렉터리를 매번 다시 써서 실측 17KB/s 밖에 안 나왔다 (2026-09-09
+// 차량 로그). 32KB 씩 모아 쓰고 sync 는 5초에 한 번만 한다.
+static const size_t kBufBytes = 32UL * 1024UL;
+static const uint32_t kSyncEveryMs = 5000;
+// 같은 CAN ID 는 이 간격(ms)마다 한 번만 기록한다. 0 = 전부 기록.
+// Tesla Chassis 버스는 500kbps 가 거의 꽉 차서(초당 3000~4400 프레임, 텍스트로
+// 200KB/s 이상) 보드 플래시(최대 ~60KB/s)와 LTE 업로드가 절대 못 따라간다.
+// 100ms(10Hz) 면 184개 ID 기준 초당 약 1100 프레임 ≈ 65KB/s.
+static const uint32_t kLogRateDefaultMs = 100;
 
 // 기기 동작 로그(부팅·재시작 원인·Wi-Fi·PUSH 결과·CAN 상태). CAN 프레임과
 // 별도 파일. 시리얼 LOG, 웹 /events.log, NAS ?kind=events 로 꺼낸다.
@@ -82,9 +97,52 @@ Preferences prefs;
 enum WifiKind { WIFI_KIND_AP, WIFI_KIND_STA };
 
 File logFile;
-uint8_t logSlot = 0;
+volatile uint8_t logSlot = 0;
 char lineBuf[kBufBytes];
 size_t lineUsed = 0;
+bool logDirty = false;
+uint32_t lastSyncMs = 0;
+uint32_t bytesWritten = 0;   // 플래시에 실제로 쓴 CSV 바이트 (hb 에서 KB/s)
+uint32_t hbMarkWritten = 0;
+
+// ID 별 마지막 기록 시각. 11비트 ID 는 직접 인덱스, 29비트는 작은 해시 표.
+uint32_t logRateMs = kLogRateDefaultMs;
+volatile uint32_t rateSkipped = 0;
+struct IdStamp {
+  uint32_t id;
+  uint32_t ms;
+};
+static uint32_t lastStdA[2048];
+static uint32_t lastStdB[2048];
+static IdStamp lastExtA[256];
+static IdStamp lastExtB[256];
+
+// 두 태스크(loop, push)가 FFat 파일을 함께 만지므로: 로그 파일 교체/삭제와
+// 업로드용 읽기는 fsMux, 기기 로그 쓰기는 evtMux, NVS 는 prefsMux 로 나눈다.
+SemaphoreHandle_t fsMux = nullptr;
+SemaphoreHandle_t evtMux = nullptr;
+SemaphoreHandle_t prefsMux = nullptr;
+
+// 재시작 직전에 무엇을 하고 있었는지. RTC 메모리는 소프트/WDT 리셋에도 남는다.
+// 코어덤프가 안 남는 크래시(플래시 쓰기 중 죽는 경우)를 이걸로 가른다.
+enum Phase : uint32_t {
+  PH_BOOT = 0, PH_LOOP, PH_DRAIN, PH_FLASH_WRITE, PH_SYNC, PH_ROTATE,
+  PH_SERIAL, PH_HTTP, PH_HB, PH_WIFI, PH_NTP, PH_EVT, PH_SETUP_CAN,
+  PH_SETUP_WIFI, PH_SETUP_FS, PH_DUMP, PH_CLEAR, PH_FORMAT
+};
+enum PushPhase : uint32_t {
+  PP_IDLE = 0, PP_READ, PP_TLS_POST, PP_PREFS, PP_EVT_READ, PP_EVT_POST,
+  PP_VERIFY, PP_TEST
+};
+static const uint32_t kBcMagic = 0x74326361;  // 't2ca'
+RTC_NOINIT_ATTR uint32_t bcMagic;
+RTC_NOINIT_ATTR uint32_t bcPhase;
+RTC_NOINIT_ATTR uint32_t bcMs;
+RTC_NOINIT_ATTR uint32_t bcPushPhase;
+RTC_NOINIT_ATTR uint32_t bcPushMs;
+RTC_NOINIT_ATTR uint32_t bcFramesB;
+RTC_NOINIT_ATTR uint32_t bcQueueFree;
+RTC_NOINIT_ATTR uint32_t bcHeap;
 
 // CAN 수신은 별도 태스크(core 1, 높은 우선순위)가 한다. Wi-Fi 스캔이나
 // HTTPS PUSH 로 loop() 가 몇 초 멈춰도 프레임을 잃지 않게 하기 위함.
@@ -110,6 +168,10 @@ uint32_t staNoLinkMs = 0;
 uint32_t lastPushMs = 0;
 uint32_t sentOff = 0;
 uint8_t sentSlot = 0;
+TaskHandle_t pushTaskHandle = nullptr;
+volatile bool pushNowReq = false;
+volatile bool pushTestReq = false;
+volatile bool pushBusy = false;
 uint32_t evtSentOff = 0;
 uint32_t evtWriteFail = 0;
 bool ffatFormatted = false;
@@ -153,9 +215,12 @@ String pushKey;
 static const uint32_t kStaSearchEveryMs = 10UL * 1000UL;
 static const uint32_t kStaHoldMs = 8UL * 1000UL;
 static const uint32_t kStaLostConfirmMs = 4UL * 1000UL;
+// 업로드는 별도 태스크(core 0). 밀린 게 있으면 2초 쉬고 다시 64KB × 8 까지,
+// 다 올렸으면 1분마다 확인. loop() 는 그 사이에도 계속 플래시에 쓴다.
 static const uint32_t kPushEveryMs = 60UL * 1000UL;
-static const size_t kPushChunk = 48UL * 1024UL;
-static const int kPushChunks = 4;
+static const uint32_t kPushBacklogEveryMs = 2000;
+static const size_t kPushChunk = 64UL * 1024UL;
+static const int kPushChunks = 8;
 
 void handleRoot();
 void handleStat();
@@ -166,8 +231,34 @@ void savePushPrefs();
 
 static const char *activePath() { return logSlot ? kLog1 : kLog0; }
 
+struct MuxLock {
+  SemaphoreHandle_t m;
+  bool held;
+  explicit MuxLock(SemaphoreHandle_t mux, uint32_t waitMs = 5000) : m(mux), held(false) {
+    if (m) {
+      held = xSemaphoreTakeRecursive(m, pdMS_TO_TICKS(waitMs)) == pdTRUE;
+    } else {
+      held = true;
+    }
+  }
+  ~MuxLock() {
+    if (m && held) {
+      xSemaphoreGiveRecursive(m);
+    }
+  }
+};
+
+inline void bc(uint32_t ph) {
+  bcPhase = ph;
+  bcMs = millis();
+}
+inline void bcPush(uint32_t ph) {
+  bcPushPhase = ph;
+  bcPushMs = millis();
+}
+
 // ---------- 기기 동작 로그 ----------
-// loop()/setup() 에서만 부른다 (CAN 수신 태스크에서는 금지: FFat 은 한 태스크만).
+// loop()/setup()/push 태스크에서 부른다 (CAN 수신 태스크에서는 금지).
 void evt(const char *fmt, ...) {
   char msg[200];
   va_list ap;
@@ -181,6 +272,11 @@ void evt(const char *fmt, ...) {
            static_cast<unsigned long>(millis() / 1000), msg);
   Serial.print(line);
   if (!FFat.totalBytes()) {
+    return;
+  }
+  MuxLock lk(evtMux);
+  if (!lk.held) {
+    evtWriteFail++;
     return;
   }
   File f = FFat.open(kEvtPath, FILE_APPEND);
@@ -198,6 +294,44 @@ void evt(const char *fmt, ...) {
     FFat.rename(kEvtPath, kEvtOld);
     evtSentOff = 0;
     savePushPrefs();
+  }
+}
+
+const char *phaseText(uint32_t p) {
+  switch (p) {
+    case PH_BOOT: return "boot";
+    case PH_LOOP: return "loop";
+    case PH_DRAIN: return "queue->buffer";
+    case PH_FLASH_WRITE: return "FLASH WRITE";
+    case PH_SYNC: return "FLASH SYNC";
+    case PH_ROTATE: return "log rotate";
+    case PH_SERIAL: return "serial cmd";
+    case PH_HTTP: return "web server";
+    case PH_HB: return "heartbeat";
+    case PH_WIFI: return "wifi state";
+    case PH_NTP: return "ntp";
+    case PH_EVT: return "event log write";
+    case PH_SETUP_CAN: return "setup CAN";
+    case PH_SETUP_WIFI: return "setup wifi";
+    case PH_SETUP_FS: return "setup FFat";
+    case PH_DUMP: return "DUMP";
+    case PH_CLEAR: return "CLEAR";
+    case PH_FORMAT: return "FORMAT";
+    default: return "?";
+  }
+}
+
+const char *pushPhaseText(uint32_t p) {
+  switch (p) {
+    case PP_IDLE: return "idle";
+    case PP_READ: return "read csv";
+    case PP_TLS_POST: return "TLS POST csv";
+    case PP_PREFS: return "nvs save";
+    case PP_EVT_READ: return "read events";
+    case PP_EVT_POST: return "TLS POST events";
+    case PP_VERIFY: return "verify events";
+    case PP_TEST: return "PUSH TEST";
+    default: return "?";
   }
 }
 
@@ -357,6 +491,7 @@ void mergeDefaultSta(const char *ssid, const char *pass) {
 }
 
 void saveWifiPrefs(const char *mode) {
+  MuxLock lk(prefsMux);
   prefs.begin("t2can", false);
   prefs.putString("mode", mode);
   prefs.putUChar("nssid", staNetCount);
@@ -410,6 +545,7 @@ void printWifiList() {
 }
 
 void loadWifiPrefs() {
+  MuxLock lk(prefsMux);
   prefs.begin("t2can", true);
   const String mode = prefs.getString("mode", "");
   const uint8_t nssid = prefs.getUChar("nssid", 255);
@@ -419,6 +555,7 @@ void loadWifiPrefs() {
   sentOff = prefs.getUInt("sentOff", 0);
   sentSlot = static_cast<uint8_t>(prefs.getUChar("sentSlot", 0));
   evtSentOff = prefs.getUInt("evtOff", 0);
+  logRateMs = prefs.getUInt("logRate", kLogRateDefaultMs);
   staNetCount = 0;
   if (nssid != 255) {
     const uint8_t n = nssid > kMaxStaNets ? kMaxStaNets : nssid;
@@ -475,6 +612,7 @@ void loadWifiPrefs() {
 }
 
 void savePushPrefs() {
+  MuxLock lk(prefsMux);
   prefs.begin("t2can", false);
   prefs.putString("pushUrl", pushUrl);
   prefs.putString("pushKey", pushKey);
@@ -482,6 +620,7 @@ void savePushPrefs() {
   prefs.putUInt("sentOff", sentOff);
   prefs.putUChar("sentSlot", sentSlot);
   prefs.putUInt("evtOff", evtSentOff);
+  prefs.putUInt("logRate", logRateMs);
   prefs.end();
 }
 
@@ -496,24 +635,49 @@ void bindHttp() {
   http.begin();
 }
 
+// 모아둔 줄을 파일에 쓴다 (sync 는 하지 않음 — syncLog 가 5초마다).
 void flushLog() {
   if (!logFile || lineUsed == 0) {
     return;
   }
-  logFile.write(reinterpret_cast<const uint8_t *>(lineBuf), lineUsed);
-  logFile.flush();
+  bc(PH_FLASH_WRITE);
+  const size_t n = logFile.write(reinterpret_cast<const uint8_t *>(lineBuf), lineUsed);
+  bc(PH_LOOP);
+  bytesWritten += n;
   lineUsed = 0;
+  logDirty = true;
+}
+
+// 디렉터리 엔트리(파일 크기)와 FAT 를 플래시에 확정한다. 크래시하면 마지막
+// sync 이후 몇 초치는 잃을 수 있지만, 매번 하면 쓰기 속도가 1/4 로 떨어진다.
+void syncLog(bool force) {
+  if (!logFile || !logDirty) {
+    return;
+  }
+  if (!force && millis() - lastSyncMs < kSyncEveryMs) {
+    return;
+  }
+  bc(PH_SYNC);
+  logFile.flush();
+  bc(PH_LOOP);
+  logDirty = false;
+  lastSyncMs = millis();
 }
 
 void rotateIfNeeded() {
   if (!logFile || logFile.size() < kRotateBytes) {
     return;
   }
+  bc(PH_ROTATE);
+  MuxLock lk(fsMux);
   flushLog();
+  syncLog(true);
   logFile.close();
   logSlot = logSlot ? 0 : 1;
   FFat.remove(activePath());
   logFile = FFat.open(activePath(), FILE_APPEND);
+  lastSyncMs = millis();
+  bc(PH_LOOP);
   evt("can log rotate -> %s", activePath());
 }
 
@@ -533,6 +697,30 @@ bool appendLine(const char *line) {
   }
   memcpy(lineBuf + lineUsed, line, n);
   lineUsed += n;
+  return true;
+}
+
+// ID 별 간격 제한. 수신 태스크에서만 부른다.
+bool rateAllows(char bus, uint32_t id, bool extended, uint32_t now) {
+  if (logRateMs == 0) {
+    return true;
+  }
+  if (!extended && id < 2048) {
+    uint32_t *tbl = (bus == 'A') ? lastStdA : lastStdB;
+    // 0 = 아직 없음. now 가 0 이 되는 일은 부팅 직후 1ms 뿐이라 무시.
+    if (tbl[id] && now - tbl[id] < logRateMs) {
+      return false;
+    }
+    tbl[id] = now ? now : 1;
+    return true;
+  }
+  IdStamp *tbl = (bus == 'A') ? lastExtA : lastExtB;
+  IdStamp &s = tbl[(id ^ (id >> 8) ^ (id >> 16) ^ (id >> 24)) & 0xFF];
+  if (s.id == id && s.ms && now - s.ms < logRateMs) {
+    return false;
+  }
+  s.id = id;
+  s.ms = now ? now : 1;
   return true;
 }
 
@@ -615,6 +803,7 @@ void drainCanQueue() {
     return;
   }
   char line[256];
+  bc(PH_DRAIN);
   for (int k = 0; k < 512; k++) {
     const size_t n = xMessageBufferReceive(canQueue, line, sizeof(line) - 1, 0);
     if (!n) {
@@ -626,11 +815,31 @@ void drainCanQueue() {
       Serial.print(line);
     }
   }
+  bc(PH_LOOP);
+}
+
+static size_t fileSize(const char *path) {
+  File f = FFat.open(path, FILE_READ);
+  if (!f) {
+    return 0;
+  }
+  const size_t sz = f.size();
+  f.close();
+  return sz;
 }
 
 void openLog() {
-  if (FFat.exists(kLog1) && !FFat.exists(kLog0)) {
+  const bool has0 = FFat.exists(kLog0);
+  const bool has1 = FFat.exists(kLog1);
+  if (has1 && !has0) {
     logSlot = 1;
+  } else if (has0 && has1) {
+    // 둘 다 있으면 작은 쪽이 쓰던 파일이다 (큰 쪽은 3MB 를 채워 넘긴 옛 파일).
+    // 예전엔 무조건 0 을 열어, 0 이 꽉 차 있으면 바로 회전하며 아직 안 올린
+    // 1 을 지웠다.
+    logSlot = (fileSize(kLog1) < fileSize(kLog0)) ? 1 : 0;
+  } else {
+    logSlot = 0;
   }
   logFile = FFat.open(activePath(), FILE_APPEND);
   if (!logFile) {
@@ -644,6 +853,8 @@ void openLog() {
       Serial.println("!! log header write FAIL — flash not writable (FS / FORMAT)");
     }
   }
+  lastSyncMs = millis();
+  logDirty = false;
   Serial.printf("log file %s  size=%u\n", activePath(),
                 static_cast<unsigned>(logFile.size()));
 }
@@ -711,6 +922,7 @@ void sendFileToHttp(const char *path) {
 
 void handleLog() {
   flushLog();
+  syncLog(true);
   http.setContentLength(CONTENT_LENGTH_UNKNOWN);
   http.send(200, "text/csv; charset=utf-8", "");
   if (logSlot == 1) {
@@ -895,7 +1107,7 @@ void wifiScan() {
     Serial.println("no 2.4GHz networks. If the car SSID is 5GHz-only, the board cannot join it.");
   } else {
     for (int i = 0; i < n; i++) {
-      Serial.printf("  %s  %ddBm\n", WiFi.SSID(i).c_str(), WiFi.RSSI(i));
+      Serial.printf("  %s  %ddBm\n", WiFi.SSID(i).c_str(), static_cast<int>(WiFi.RSSI(i)));
     }
   }
   WiFi.scanDelete();
@@ -1035,25 +1247,52 @@ void printHttpCode(int code) {
   Serial.println();
 }
 
-int httpsPostTo(const String &url, const String &body, String *respOut) {
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setHandshakeTimeout(20);
-  HTTPClient http;
-  http.setTimeout(20000);
-  http.setReuse(false);
-  if (!http.begin(client, url)) {
+// ---------- NAS 업로드 (push 태스크, core 0) ----------
+// TLS 연결을 태스크 안에서 유지해 POST 마다 핸드셰이크(1~2초)를 다시 하지
+// 않는다. 서버가 keep-alive 를 끊으면 HTTPClient 가 알아서 다시 연다.
+WiFiClientSecure *pushClient = nullptr;
+HTTPClient *pushHttp = nullptr;
+
+void pushHttpReset() {
+  if (pushHttp) {
+    pushHttp->end();
+    delete pushHttp;
+    pushHttp = nullptr;
+  }
+  if (pushClient) {
+    pushClient->stop();
+    delete pushClient;
+    pushClient = nullptr;
+  }
+}
+
+int httpsPostBytes(const String &url, const uint8_t *body, size_t len,
+                   String *respOut) {
+  if (!pushClient) {
+    pushClient = new WiFiClientSecure();
+    pushClient->setInsecure();
+    pushClient->setHandshakeTimeout(20);
+  }
+  if (!pushHttp) {
+    pushHttp = new HTTPClient();
+    pushHttp->setTimeout(20000);
+    pushHttp->setReuse(true);
+  }
+  if (!pushHttp->begin(*pushClient, url)) {
     evt("push begin fail (bad url?)");
+    pushHttpReset();
     return -1;
   }
-  http.addHeader("X-API-Key", pushKey);
-  http.addHeader("Content-Type", "text/csv; charset=utf-8");
-  const int code = http.POST(body);
+  pushHttp->addHeader("X-API-Key", pushKey);
+  pushHttp->addHeader("Content-Type", "text/csv; charset=utf-8");
+  bcPush(PP_TLS_POST);
+  const int code = pushHttp->POST(const_cast<uint8_t *>(body), len);
+  bcPush(PP_IDLE);
   printHttpCode(code);
   if (respOut) {
-    *respOut = (code > 0) ? http.getString() : String();
+    *respOut = (code > 0) ? pushHttp->getString() : String();
   }
-  http.end();
+  pushHttp->end();
   pushLastCode = code;
   if (code >= 200 && code < 300) {
     pushOkCount++;
@@ -1061,41 +1300,89 @@ int httpsPostTo(const String &url, const String &body, String *respOut) {
     pushFailCount++;
     if (code < 0) {
       evt("push FAIL %s rssi=%d body=%uB", HTTPClient::errorToString(code).c_str(),
-          WiFi.RSSI(), static_cast<unsigned>(body.length()));
+          WiFi.RSSI(), static_cast<unsigned>(len));
+      // 끊긴 소켓은 버리고 다음에 새로 연다.
+      pushHttpReset();
     } else {
-      evt("push FAIL http %d body=%uB", code,
-          static_cast<unsigned>(body.length()));
+      evt("push FAIL http %d body=%uB", code, static_cast<unsigned>(len));
     }
   }
   return code;
 }
 
+int httpsPostTo(const String &url, const String &body, String *respOut) {
+  return httpsPostBytes(url, reinterpret_cast<const uint8_t *>(body.c_str()),
+                        body.length(), respOut);
+}
+
 int httpsPost(const String &body) { return httpsPostTo(pushUrl, body, nullptr); }
 
-bool uploadRange(const char *path, uint32_t offset, size_t nbytes) {
-  File f = FFat.open(path, FILE_READ);
-  if (!f) {
-    return false;
+// 파일 일부를 읽어 올린다. 읽는 동안 loop() 가 그 파일을 지우거나 바꾸지
+// 못하게 fsMux. 읽기 버퍼는 PSRAM (64KB).
+static uint8_t *pushBuf = nullptr;
+
+bool uploadRange(const char *path, const String &url, uint32_t offset,
+                 size_t nbytes, size_t &sentOut) {
+  sentOut = 0;
+  if (!pushBuf) {
+    pushBuf = static_cast<uint8_t *>(psramFound() ? ps_malloc(kPushChunk)
+                                                  : malloc(kPushChunk));
+    if (!pushBuf) {
+      evt("push buffer alloc FAIL");
+      return false;
+    }
   }
-  if (offset > f.size()) {
+  if (nbytes > kPushChunk) {
+    nbytes = kPushChunk;
+  }
+  size_t got = 0;
+  {
+    MuxLock lk(fsMux);
+    if (!lk.held) {
+      return false;
+    }
+    bcPush(PP_READ);
+    File f = FFat.open(path, FILE_READ);
+    if (!f) {
+      bcPush(PP_IDLE);
+      return false;
+    }
+    if (offset > f.size() || !f.seek(offset)) {
+      f.close();
+      bcPush(PP_IDLE);
+      return false;
+    }
+    while (got < nbytes) {
+      const int n = f.read(pushBuf + got, nbytes - got);
+      if (n <= 0) {
+        break;
+      }
+      got += n;
+    }
     f.close();
+    bcPush(PP_IDLE);
+  }
+  if (!got) {
     return false;
   }
-  if (!f.seek(offset)) {
-    f.close();
+  // 줄 중간에서 끊지 않는다 (서버는 줄 단위로 붙인다). 마지막 줄바꿈까지만.
+  if (got == nbytes) {
+    size_t cut = got;
+    while (cut > 0 && pushBuf[cut - 1] != '\n') {
+      cut--;
+    }
+    if (cut > 0) {
+      got = cut;
+    }
+  }
+  Serial.printf("PUSH %s +%u %uB ...\n", path, static_cast<unsigned>(offset),
+                static_cast<unsigned>(got));
+  const int code = httpsPostBytes(url, pushBuf, got, nullptr);
+  if (code < 200 || code >= 300) {
     return false;
   }
-  String chunk;
-  chunk.reserve(nbytes + 8);
-  while (chunk.length() < nbytes && f.available()) {
-    chunk += static_cast<char>(f.read());
-  }
-  f.close();
-  Serial.printf("PUSH %s +%u %uB ...\n", path,
-                static_cast<unsigned>(offset),
-                static_cast<unsigned>(chunk.length()));
-  const int code = httpsPost(chunk);
-  return code >= 200 && code < 300;
+  sentOut = got;
+  return true;
 }
 
 void pushTest() {
@@ -1107,6 +1394,7 @@ void pushTest() {
     Serial.println("PUSH URL and PUSH KEY first");
     return;
   }
+  bcPush(PP_TEST);
   Serial.printf("ip=%s gw=%s dns=%s\n", WiFi.localIP().toString().c_str(),
                 WiFi.gatewayIP().toString().c_str(),
                 WiFi.dnsIP().toString().c_str());
@@ -1115,6 +1403,7 @@ void pushTest() {
   if (WiFi.hostByName(host.c_str(), resolved) != 1) {
     Serial.printf("DNS fail for %s — car Wi-Fi may have no internet\n",
                   host.c_str());
+    bcPush(PP_IDLE);
     return;
   }
   Serial.printf("DNS %s -> %s\n", host.c_str(), resolved.toString().c_str());
@@ -1123,6 +1412,7 @@ void pushTest() {
       httpsPost("time,ms,bus,id,dlc,data\n-,0,A,000,1,00\n");
   Serial.println((code >= 200 && code < 300) ? "PUSH TEST ok"
                                              : "PUSH TEST fail");
+  bcPush(PP_IDLE);
 }
 
 static String eventsPushUrl() {
@@ -1140,8 +1430,10 @@ bool verifyEventsPush() {
     return false;
   }
   Serial.println("PUSH events: NAS 지원 확인 중 ...");
+  bcPush(PP_VERIFY);
   String resp;
   const int code = httpsPostTo(eventsPushUrl(), "\n", &resp);
+  bcPush(PP_IDLE);
   if (code >= 200 && code < 300 && resp.indexOf("\"kind\":\"events\"") >= 0) {
     eventsPushVerified = true;
     evt("nas accepts kind=events — device log upload on");
@@ -1155,14 +1447,16 @@ bool verifyEventsPush() {
 
 // 기기 동작 로그도 NAS 로 올린다 (?kind=events). 한 번에 한 조각.
 bool pushEvents() {
-  File f = FFat.open(kEvtPath, FILE_READ);
-  if (!f) {
+  size_t sz = 0;
+  {
+    MuxLock lk(evtMux);
+    sz = fileSize(kEvtPath);
+  }
+  if (!sz) {
     Serial.printf("PUSH events: %s 없음 (write_fail=%lu)\n", kEvtPath,
                   static_cast<unsigned long>(evtWriteFail));
     return true;
   }
-  const uint32_t sz = f.size();
-  f.close();
   if (evtSentOff > sz) {
     evtSentOff = 0;
   }
@@ -1173,31 +1467,21 @@ bool pushEvents() {
   if (!verifyEventsPush()) {
     return false;
   }
-  const size_t n = (sz - evtSentOff) > kPushChunk ? kPushChunk : (sz - evtSentOff);
-  File src = FFat.open(kEvtPath, FILE_READ);
-  if (!src || !src.seek(evtSentOff)) {
-    Serial.println("PUSH events: open/seek fail");
+  bcPush(PP_EVT_READ);
+  size_t sent = 0;
+  const bool ok = uploadRange(kEvtPath, eventsPushUrl(), evtSentOff, sz - evtSentOff, sent);
+  if (!ok) {
     return false;
   }
-  String chunk;
-  chunk.reserve(n + 8);
-  while (chunk.length() < n && src.available()) {
-    chunk += static_cast<char>(src.read());
-  }
-  src.close();
-  Serial.printf("PUSH events +%u %uB ...\n", static_cast<unsigned>(evtSentOff),
-                static_cast<unsigned>(chunk.length()));
-  const int code = httpsPostTo(eventsPushUrl(), chunk, nullptr);
-  if (code < 200 || code >= 300) {
-    return false;
-  }
-  evtSentOff += chunk.length();
+  evtSentOff += sent;
+  bcPush(PP_PREFS);
   savePushPrefs();
+  bcPush(PP_IDLE);
   return true;
 }
 
+// 아직 안 올린 CSV 를 최대 kPushChunks 조각 올린다. 다 올렸으면 true.
 bool pushMore() {
-  flushLog();
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("PUSH needs STA Wi-Fi");
     return false;
@@ -1209,63 +1493,103 @@ bool pushMore() {
 
   pushEvents();
   int chunks = 0;
+  bool caughtUp = false;
   while (chunks < kPushChunks) {
-    if (sentSlot != logSlot) {
+    const uint8_t slotNow = logSlot;
+    if (sentSlot != slotNow) {
       const char *oldPath = sentSlot ? kLog1 : kLog0;
-      File oldf = FFat.open(oldPath, FILE_READ);
-      if (!oldf) {
-        sentSlot = logSlot;
-        sentOff = 0;
-        savePushPrefs();
-        continue;
-      }
-      const uint32_t sz = oldf.size();
-      oldf.close();
+      const size_t sz = fileSize(oldPath);
       if (sentOff >= sz) {
-        sentSlot = logSlot;
+        sentSlot = slotNow;
         sentOff = 0;
         savePushPrefs();
         continue;
       }
-      const size_t n = (sz - sentOff) > kPushChunk ? kPushChunk : (sz - sentOff);
-      if (!uploadRange(oldPath, sentOff, n)) {
+      size_t sent = 0;
+      if (!uploadRange(oldPath, pushUrl, sentOff, sz - sentOff, sent)) {
         return false;
       }
-      sentOff += n;
+      sentOff += sent;
       savePushPrefs();
       chunks++;
       continue;
     }
 
-    if (!logFile) {
-      break;
-    }
-    const uint32_t sz = logFile.size();
+    // loop() 가 5초마다 sync 한 크기까지만 보인다 (그 뒤 줄은 다음 차례에).
+    const size_t sz = fileSize(slotNow ? kLog1 : kLog0);
     if (sentOff > sz) {
       sentOff = 0;
     }
     if (sentOff >= sz) {
+      caughtUp = true;
       break;
     }
-    const size_t n = (sz - sentOff) > kPushChunk ? kPushChunk : (sz - sentOff);
-    if (!uploadRange(activePath(), sentOff, n)) {
+    size_t sent = 0;
+    if (!uploadRange(slotNow ? kLog1 : kLog0, pushUrl, sentOff, sz - sentOff, sent)) {
       return false;
     }
-    sentOff += n;
+    sentOff += sent;
     savePushPrefs();
     chunks++;
   }
   if (chunks) {
-    evt("push ok %d chunk(s) -> %s @%u", chunks, activePath(),
-        static_cast<unsigned>(sentOff));
+    evt("push ok %d chunk(s) -> %s @%u%s", chunks, activePath(),
+        static_cast<unsigned>(sentOff), caughtUp ? "" : " (backlog)");
   } else {
     Serial.printf("PUSH caught up to %s @%u\n", activePath(),
                   static_cast<unsigned>(sentOff));
   }
-  return true;
+  return caughtUp;
 }
 
-void pushLogs() { pushMore(); }
+// 업로드 태스크. loop() 와 별도 코어에서 돌아 TLS 가 몇 초 걸려도 CAN 줄을
+// 플래시에 쓰는 일이 멈추지 않는다.
+void pushTask(void *) {
+  uint32_t nextMs = 0;
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+    const uint32_t now = millis();
+    const bool sta = wifiOn && wifiKind == WIFI_KIND_STA && WiFi.status() == WL_CONNECTED;
+    if (pushTestReq) {
+      pushTestReq = false;
+      pushBusy = true;
+      pushTest();
+      pushBusy = false;
+      continue;
+    }
+    bool run = false;
+    if (pushNowReq) {
+      pushNowReq = false;
+      run = true;
+    } else if (pushAuto && sta && (nextMs == 0 || static_cast<int32_t>(now - nextMs) >= 0)) {
+      run = true;
+    }
+    if (!run) {
+      if (!sta) {
+        // Wi-Fi 가 없으면 소켓도 정리
+        if (pushHttp || pushClient) {
+          pushHttpReset();
+        }
+      }
+      continue;
+    }
+    pushBusy = true;
+    lastPushMs = now;
+    const bool caughtUp = pushMore();
+    pushBusy = false;
+    nextMs = millis() + (caughtUp ? kPushEveryMs : kPushBacklogEveryMs);
+  }
+}
+
+void startPushTask() {
+  if (pushTaskHandle) {
+    return;
+  }
+  // TLS 핸드셰이크가 스택을 많이 쓴다.
+  xTaskCreatePinnedToCore(pushTask, "push", 16384, nullptr, 1, &pushTaskHandle, 0);
+}
+
+void pushLogs() { pushNowReq = true; }
 
 void printHelp() {
   Serial.println("HELP  STAT  DUMP  CLEAR  ECHO ON|OFF");
@@ -1274,6 +1598,7 @@ void printHelp() {
   Serial.println("PUSH URL <https://.../api/canlog>  PUSH KEY <api-key>");
   Serial.println("PUSH NOW  PUSH AUTO ON|OFF  PUSH TEST");
   Serial.println("LOG (기기 동작 로그 최근)  LOG ALL  LOG CLEAR  CANA (A 진단)");
+  Serial.println("LOG RATE <ms> (같은 ID 기록 간격, 기본 100, 0=전부)");
   Serial.println("FS (플래시 파일·쓰기 테스트)  FORMAT (플래시 초기화)");
 }
 
@@ -1294,12 +1619,18 @@ void printStat() {
                 rateA ? "통신중" : "응답없음",
                 static_cast<unsigned long>(rateB),
                 rateB ? "통신중" : "응답없음");
-  Serial.printf("rx task=%s  queue=%uKB  B missed=%lu overrun=%lu recovered=%lu\n",
+  Serial.printf("rx task=%s  queue=%uKB free=%uKB  B missed=%lu overrun=%lu recovered=%lu\n",
                 canTaskHandle ? "on" : "off",
                 static_cast<unsigned>(canQueueBytes / 1024),
+                static_cast<unsigned>(canQueue ? xMessageBufferSpacesAvailable(canQueue) / 1024 : 0),
                 static_cast<unsigned long>(twaiMissed),
                 static_cast<unsigned long>(twaiOverrun),
                 static_cast<unsigned long>(twaiRecovered));
+  Serial.printf("log rate=%lums (같은 ID 간격)  skipped=%lu  written=%luKB  push task=%s%s\n",
+                static_cast<unsigned long>(logRateMs),
+                static_cast<unsigned long>(rateSkipped),
+                static_cast<unsigned long>(bytesWritten / 1024),
+                pushTaskHandle ? "on" : "off", pushBusy ? " (busy)" : "");
   Serial.printf("wifi=%s  ip=%s  ssid=%s  saved=%u  search=%s\n",
                 wifiOn ? ((wifiKind == WIFI_KIND_STA) ? "sta" : "ap") : "off",
                 currentWifiIp().c_str(),
@@ -1360,18 +1691,28 @@ void heartbeat() {
   const uint32_t dB = b - hbMarkB;
   hbMarkA = a;
   hbMarkB = b;
+  const uint32_t w = bytesWritten;
+  const uint32_t dW = w - hbMarkWritten;
+  hbMarkWritten = w;
+  const uint32_t secs = hbCount <= 1 ? 20 : kHbEveryMs / 1000;
   const bool sta = wifiKind == WIFI_KIND_STA && WiFi.status() == WL_CONNECTED;
-  evt("hb A+%lu B+%lu drop=%lu Bmiss=%lu log=%s:%u wifi=%s ssid=%s rssi=%d "
-      "push=%s ok=%lu fail=%lu last=%d heap=%u",
+  const size_t qFree = canQueue ? xMessageBufferSpacesAvailable(canQueue) : 0;
+  const unsigned qUsedPct =
+      canQueueBytes ? static_cast<unsigned>(100 - (qFree * 100) / canQueueBytes) : 0;
+  evt("hb A+%lu B+%lu skip=%lu drop=%lu Bmiss=%lu Bover=%lu q=%u%% wr=%luKB/s "
+      "log=%s:%u wifi=%s ssid=%s rssi=%d push=%s ok=%lu fail=%lu last=%d sent=%u heap=%u",
       static_cast<unsigned long>(dA), static_cast<unsigned long>(dB),
+      static_cast<unsigned long>(rateSkipped),
       static_cast<unsigned long>(dropped), static_cast<unsigned long>(twaiMissed),
-      activePath(),
+      static_cast<unsigned long>(twaiOverrun), qUsedPct,
+      static_cast<unsigned long>(dW / 1024 / secs), activePath(),
       static_cast<unsigned>(logFile ? logFile.size() + lineUsed : 0),
       wifiOn ? (sta ? "sta" : (staSearching ? "search" : "ap")) : "off",
       sta ? staSsid.c_str() : "-", sta ? WiFi.RSSI() : 0,
-      pushAuto ? "auto" : "off", static_cast<unsigned long>(pushOkCount),
+      pushAuto ? (pushBusy ? "busy" : "auto") : "off",
+      static_cast<unsigned long>(pushOkCount),
       static_cast<unsigned long>(pushFailCount), pushLastCode,
-      static_cast<unsigned>(ESP.getFreeHeap()));
+      static_cast<unsigned>(sentOff), static_cast<unsigned>(ESP.getFreeHeap()));
   char buf[320];
   describeCanA(buf, sizeof(buf), dA);
   evt("%s", buf);
@@ -1442,7 +1783,9 @@ void streamFileToSerial(const char *path) {
 }
 
 void dumpFiles() {
+  bc(PH_DUMP);
   flushLog();
+  syncLog(true);
   Serial.println("---LOG-BEGIN---");
   if (logSlot == 1) {
     streamFileToSerial(kLog0);
@@ -1452,9 +1795,12 @@ void dumpFiles() {
     streamFileToSerial(kLog0);
   }
   Serial.println("---LOG-END---");
+  bc(PH_LOOP);
 }
 
 void clearLogs() {
+  bc(PH_CLEAR);
+  MuxLock lk(fsMux);
   flushLog();
   if (logFile) {
     logFile.close();
@@ -1465,7 +1811,12 @@ void clearLogs() {
   framesA = 0;
   framesB = 0;
   dropped = 0;
+  rateSkipped = 0;
+  sentOff = 0;
+  sentSlot = 0;
+  savePushPrefs();
   openLog();
+  bc(PH_LOOP);
   evt("can logs cleared");
 }
 
@@ -1574,8 +1925,21 @@ void handleSerial() {
     Serial.println("push key saved");
   } else if (cmd == "PUSH NOW") {
     pushLogs();
+    Serial.println("push requested (push task)");
   } else if (cmd == "PUSH TEST") {
-    pushTest();
+    pushTestReq = true;
+  } else if (cmd.startsWith("LOG RATE")) {
+    String rest = skipWord(skipWord(raw));
+    rest.trim();
+    if (!rest.length()) {
+      Serial.printf("LOG RATE %lu ms (0 = 전부 기록, skip=%lu)\n",
+                    static_cast<unsigned long>(logRateMs),
+                    static_cast<unsigned long>(rateSkipped));
+    } else {
+      logRateMs = static_cast<uint32_t>(rest.toInt());
+      savePushPrefs();
+      evt("log rate set %lu ms", static_cast<unsigned long>(logRateMs));
+    }
   } else if (cmd == "PUSH AUTO ON") {
     pushAuto = true;
     savePushPrefs();
@@ -1625,8 +1989,12 @@ bool pollOne(CanChannel &ch, bool ok, char bus, volatile uint32_t &total) {
     if (f.rtr) {
       continue;
     }
-    logFrame(bus, f.id, f.len, f.data);
     total = total + 1;
+    if (!rateAllows(bus, f.id, f.extended, millis())) {
+      rateSkipped = rateSkipped + 1;
+      continue;
+    }
+    logFrame(bus, f.id, f.len, f.data);
   }
   return got;
 }
@@ -1674,10 +2042,23 @@ void tickCanRate(uint32_t now) {
   lastRateMs = now;
   const uint32_t a = framesA;
   const uint32_t b = framesB;
+  const uint32_t prevA = rateA;
+  const uint32_t prevB = rateB;
   rateA = a - rateMarkA;
   rateB = b - rateMarkB;
   rateMarkA = a;
   rateMarkB = b;
+  // 차가 깨어나고 잠드는 시점을 기기 로그에 남긴다.
+  if (rateB && !prevB) {
+    evt("CAN B traffic start %lu/5s", static_cast<unsigned long>(rateB));
+  } else if (!rateB && prevB) {
+    evt("CAN B traffic stop");
+  }
+  if (rateA && !prevA) {
+    evt("CAN A traffic start %lu/5s", static_cast<unsigned long>(rateA));
+  } else if (!rateA && prevA) {
+    evt("CAN A traffic stop");
+  }
   if (canBOk) {
     uint32_t q = 0;
     canB.stats(twaiMissed, twaiOverrun, q);
@@ -1727,6 +2108,9 @@ void listFs() {
 
 void formatFfat(const char *why) {
   Serial.printf("FFat FORMAT: %s (모든 로그 삭제)\n", why);
+  bc(PH_FORMAT);
+  MuxLock fs(fsMux);
+  MuxLock ev(evtMux);
   flushLog();
   if (logFile) {
     logFile.close();
@@ -1741,6 +2125,7 @@ void formatFfat(const char *why) {
   savePushPrefs();
   ffatFormatted = true;
   openLog();
+  bc(PH_LOOP);
   evt("ffat formatted: %s", why);
 }
 
@@ -1787,30 +2172,63 @@ void setup() {
   Serial.println("CAN stack from chlsw88/T-CAN2  — no TX");
   printHelp();
 
+  fsMux = xSemaphoreCreateRecursiveMutex();
+  evtMux = xSemaphoreCreateRecursiveMutex();
+  prefsMux = xSemaphoreCreateRecursiveMutex();
+  const esp_reset_reason_t rr = esp_reset_reason();
+  // 브레드크럼은 FFat 보다 먼저 읽는다 (마운트/포맷 중에 죽어도 남게).
+  const bool bcValid = bcMagic == kBcMagic;
+  const uint32_t lastPhase = bcPhase, lastMs = bcMs, lastPushPh = bcPushPhase,
+                 lastPushMsV = bcPushMs, lastFramesB = bcFramesB,
+                 lastQFree = bcQueueFree, lastHeap = bcHeap;
+  bcMagic = kBcMagic;
+  bc(PH_SETUP_FS);
+
   mountFfat();
   if (FFat.totalBytes()) {
     openLog();
   }
   loadWifiPrefs();
-  evt("boot reset=%s fw=%s %s ffat_free=%u/%u%s psram=%u",
-      resetReasonText(esp_reset_reason()), __DATE__, __TIME__,
+  evt("boot reset=%s fw=%s %s ffat_free=%u/%u%s psram=%u rate=%lums",
+      resetReasonText(rr), __DATE__, __TIME__,
       static_cast<unsigned>(FFat.freeBytes()),
       static_cast<unsigned>(FFat.totalBytes()),
       ffatFormatted ? " (FORMATTED this boot)" : "",
-      static_cast<unsigned>(ESP.getPsramSize()));
+      static_cast<unsigned>(ESP.getPsramSize()),
+      static_cast<unsigned long>(logRateMs));
+  if (bcValid && rr != ESP_RST_POWERON && rr != ESP_RST_UNKNOWN) {
+    evt("LAST RUN ended in loop=%s (up=%lu.%03lus) push=%s (up=%lu.%03lus) "
+        "framesB=%lu queue_free=%luKB heap=%lu",
+        phaseText(lastPhase), static_cast<unsigned long>(lastMs / 1000),
+        static_cast<unsigned long>(lastMs % 1000), pushPhaseText(lastPushPh),
+        static_cast<unsigned long>(lastPushMsV / 1000),
+        static_cast<unsigned long>(lastPushMsV % 1000),
+        static_cast<unsigned long>(lastFramesB),
+        static_cast<unsigned long>(lastQFree / 1024),
+        static_cast<unsigned long>(lastHeap));
+  }
+  bcPushPhase = PP_IDLE;
+  bcPushMs = 0;
+  bcFramesB = 0;
+  bcQueueFree = 0;
+  bcHeap = 0;
   if (evtWriteFail) {
     Serial.printf("!! events.log write still failing (%lu)\n",
                   static_cast<unsigned long>(evtWriteFail));
   }
   reportCoreDump();
 
+  bc(PH_SETUP_CAN);
   canAOk = startCanA();
   canBOk = startCanB();
   startCanTask();
+  bc(PH_SETUP_WIFI);
   printWifiList();
   if (wifiOn) {
     startWifi();
   }
+  startPushTask();
+  bc(PH_LOOP);
 }
 
 void loop() {
@@ -1820,16 +2238,23 @@ void loop() {
     pollOne(canB, canBOk, 'B', framesB);
     pollOne(canA, canAOk, 'A', framesA);
   }
+  bc(PH_SERIAL);
   handleSerial();
   if (wifiOn) {
+    bc(PH_HTTP);
     http.handleClient();
   }
+  bc(PH_LOOP);
 
   const uint32_t now = millis();
   if (now - lastStatMs >= 2000) {
     lastStatMs = now;
     flushLog();
     rotateIfNeeded();
+    syncLog(false);
+    bcFramesB = framesB;
+    bcQueueFree = canQueue ? xMessageBufferSpacesAvailable(canQueue) : 0;
+    bcHeap = ESP.getFreeHeap();
   }
   tickCanRate(now);
   // 첫 상태 줄은 20초에 — 차에서 1분을 못 버티고 죽을 때도 A/B 수신량과
@@ -1837,8 +2262,11 @@ void loop() {
   if (now - lastHbMs >= (hbCount == 0 ? 20000UL : kHbEveryMs)) {
     lastHbMs = now;
     hbCount++;
+    bc(PH_HB);
     heartbeat();
+    bc(PH_LOOP);
   }
+  bc(PH_WIFI);
   if (wifiOn && wantSta && staNetCount) {
     if (staLinked()) {
       staNoLinkMs = 0;
@@ -1883,9 +2311,5 @@ void loop() {
     }
   }
   tickPreferredNet(now);
-  if (pushAuto && wifiKind == WIFI_KIND_STA &&
-      WiFi.status() == WL_CONNECTED && now - lastPushMs >= kPushEveryMs) {
-    lastPushMs = now;
-    pushLogs();
-  }
+  bc(PH_LOOP);
 }
