@@ -140,6 +140,11 @@ WifiKind wifiKind = WIFI_KIND_AP;
 StaNet staNets[kMaxStaNets];
 uint8_t staNetCount = 0;
 uint8_t staTryIdx = 0;
+bool staOrderDirty = false;
+// 낮은 우선순위 망에 붙어 있을 때, 최우선 망이 나타났는지 주기적으로 본다.
+uint32_t lastPrefCheckMs = 0;
+bool prefScanPending = false;
+static const uint32_t kPrefCheckEveryMs = 5UL * 60UL * 1000UL;
 String staSsid;
 String staPass;
 String pushUrl;
@@ -370,18 +375,33 @@ void saveWifiPrefs(const char *mode) {
     prefs.putString("ssid", staNets[0].ssid);
     prefs.putString("pass", staNets[0].pass);
   }
+  prefs.putBool("ordered", true);
   prefs.end();
 }
 
+// idx 망을 목록 맨 앞(최우선)으로 옮긴다.
+bool moveStaNetFirst(int idx) {
+  if (idx <= 0 || idx >= staNetCount) {
+    return idx == 0;
+  }
+  StaNet keep = staNets[idx];
+  for (int i = idx; i > 0; i--) {
+    staNets[i] = staNets[i - 1];
+  }
+  staNets[0] = keep;
+  return true;
+}
+
 void printWifiList() {
-  Serial.printf("saved STA %u / %u\n",
+  Serial.printf("saved STA %u / %u  (위가 우선, WIFI FIRST <ssid> 로 변경)\n",
                 static_cast<unsigned>(staNetCount),
                 static_cast<unsigned>(kMaxStaNets));
   if (!staNetCount) {
     Serial.println("  (none)  WIFI JOIN <ssid> <password>");
   }
   for (uint8_t i = 0; i < staNetCount; i++) {
-    Serial.printf("  %s  %s\n", staNets[i].ssid.c_str(),
+    Serial.printf("  %u. %s  %s\n", static_cast<unsigned>(i + 1),
+                  staNets[i].ssid.c_str(),
                   staNets[i].pass.length() ? "pass-set" : "no-pass");
   }
   if (strlen(WIFI_SSID_DEFAULT_2) && findStaNet(WIFI_SSID_DEFAULT_2) < 0) {
@@ -425,6 +445,17 @@ void loadWifiPrefs() {
   const uint8_t afterLoad = staNetCount;
   mergeDefaultSta(WIFI_SSID_DEFAULT, WIFI_PASS_DEFAULT);
   mergeDefaultSta(WIFI_SSID_DEFAULT_2, WIFI_PASS_DEFAULT_2);
+  // 순서를 한 번도 정하지 않았으면 차 공유기(WIFI_SSID_DEFAULT)를 맨 앞에.
+  prefs.begin("t2can", true);
+  const bool ordered = prefs.getBool("ordered", false);
+  prefs.end();
+  if (!ordered && strlen(WIFI_SSID_DEFAULT)) {
+    const int d = findStaNet(WIFI_SSID_DEFAULT);
+    if (d > 0) {
+      moveStaNetFirst(d);
+      staOrderDirty = true;
+    }
+  }
   applyStaNet(staNetCount ? 0 : -1);
 
   if (mode == "ap") {
@@ -437,8 +468,9 @@ void loadWifiPrefs() {
     wantSta = false;
   }
   wifiKind = WIFI_KIND_AP;
-  if (nssid == 255 || staNetCount != afterLoad) {
+  if (nssid == 255 || staNetCount != afterLoad || staOrderDirty) {
     saveWifiPrefs(wantSta ? "sta" : "ap");
+    staOrderDirty = false;
   }
 }
 
@@ -714,16 +746,20 @@ void selectStaTarget() {
     applyStaNet(-1);
     return;
   }
+  // 우선순위 = 저장 목록 순서 (WIFI LIST 의 순서, WIFI FIRST 로 바꿈).
+  // 보이는 망 중 가장 앞의 것을 고른다. 신호세기는 같은 망의 AP 여럿일 때만.
   const int n = WiFi.scanNetworks(false, false);
   int best = -1;
   int bestRssi = -200;
   if (n > 0) {
     for (int i = 0; i < n; i++) {
       const int idx = findStaNet(WiFi.SSID(i));
-      if (idx >= 0 && staNets[idx].pass.length() &&
-          WiFi.RSSI(i) > bestRssi) {
-        bestRssi = WiFi.RSSI(i);
+      if (idx < 0 || !staNets[idx].pass.length()) {
+        continue;
+      }
+      if (best < 0 || idx < best || (idx == best && WiFi.RSSI(i) > bestRssi)) {
         best = idx;
+        bestRssi = WiFi.RSSI(i);
       }
     }
   }
@@ -910,6 +946,74 @@ void wifiForget(const String &ssid) {
   printWifiList();
   if (wifiOn) {
     startWifi();
+  }
+}
+
+void wifiFirst(const String &ssid) {
+  const int found = findStaNet(ssid);
+  if (found < 0) {
+    Serial.printf("WIFI FIRST: %s not saved\n", ssid.c_str());
+    printWifiList();
+    return;
+  }
+  moveStaNetFirst(found);
+  saveWifiPrefs(wantSta ? "sta" : "ap");
+  evt("wifi first %s", ssid.c_str());
+  printWifiList();
+  if (wifiOn && wantSta && staSsid != staNets[0].ssid) {
+    startWifi();
+  }
+}
+
+// 최우선 망이 아닌 곳에 붙어 있으면 5분마다 비동기 스캔으로 최우선 망을 찾고,
+// 보이면 갈아탄다. 예: 집 Wi-Fi 에 붙어 있다가 차 공유기가 켜질 때.
+void tickPreferredNet(uint32_t now) {
+  if (!wifiOn || !wantSta || staNetCount < 2 || wifiKind != WIFI_KIND_STA ||
+      WiFi.status() != WL_CONNECTED) {
+    prefScanPending = false;
+    return;
+  }
+  if (staSsid == staNets[0].ssid || !staNets[0].pass.length()) {
+    return;
+  }
+  if (prefScanPending) {
+    const int n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) {
+      return;
+    }
+    prefScanPending = false;
+    int rssi = -200;
+    for (int i = 0; i < n; i++) {
+      if (WiFi.SSID(i) == staNets[0].ssid && WiFi.RSSI(i) > rssi) {
+        rssi = WiFi.RSSI(i);
+      }
+    }
+    WiFi.scanDelete();
+    if (rssi > -80) {
+      evt("preferred %s visible rssi=%d — leaving %s", staNets[0].ssid.c_str(),
+          rssi, staSsid.c_str());
+      applyStaNet(0);
+      staAnnounced = false;
+      staSearching = true;
+      staGotLinkMs = 0;
+      staNoLinkMs = 0;
+      wifiKind = WIFI_KIND_AP;
+      MDNS.end();
+      ntpStarted = false;
+      ntpOk = false;
+      lastWifiCheck = now;
+      WiFi.disconnect(false);
+      delay(50);
+      WiFi.begin(staSsid.c_str(), staPass.c_str());
+      evt("sta join %s", staSsid.c_str());
+    }
+    return;
+  }
+  if (now - lastPrefCheckMs >= kPrefCheckEveryMs) {
+    lastPrefCheckMs = now;
+    if (WiFi.scanNetworks(true, false) == WIFI_SCAN_RUNNING) {
+      prefScanPending = true;
+    }
   }
 }
 
@@ -1166,7 +1270,7 @@ void pushLogs() { pushMore(); }
 void printHelp() {
   Serial.println("HELP  STAT  DUMP  CLEAR  ECHO ON|OFF");
   Serial.println("WIFI ON|OFF  WIFI AP  WIFI JOIN <ssid> <pass>  WIFI LIST");
-  Serial.println("WIFI FORGET <ssid>  WIFI SCAN");
+  Serial.println("WIFI FORGET <ssid>  WIFI FIRST <ssid> (최우선)  WIFI SCAN");
   Serial.println("PUSH URL <https://.../api/canlog>  PUSH KEY <api-key>");
   Serial.println("PUSH NOW  PUSH AUTO ON|OFF  PUSH TEST");
   Serial.println("LOG (기기 동작 로그 최근)  LOG ALL  LOG CLEAR  CANA (A 진단)");
@@ -1434,6 +1538,14 @@ void handleSerial() {
     wifiScan();
   } else if (cmd == "WIFI LIST") {
     printWifiList();
+  } else if (cmd.startsWith("WIFI FIRST ")) {
+    String rest = skipWord(skipWord(raw));
+    rest.trim();
+    if (!rest.length()) {
+      Serial.println("WIFI FIRST <ssid>");
+    } else {
+      wifiFirst(rest);
+    }
   } else if (cmd.startsWith("WIFI FORGET ")) {
     String rest = skipWord(skipWord(raw));
     rest.trim();
@@ -1770,6 +1882,7 @@ void loop() {
       }
     }
   }
+  tickPreferredNet(now);
   if (pushAuto && wifiKind == WIFI_KIND_STA &&
       WiFi.status() == WL_CONNECTED && now - lastPushMs >= kPushEveryMs) {
     lastPushMs = now;
