@@ -111,6 +111,7 @@ uint32_t sentOff = 0;
 uint8_t sentSlot = 0;
 uint32_t evtSentOff = 0;
 uint32_t evtWriteFail = 0;
+bool ffatFormatted = false;
 // NAS 가 ?kind=events 를 아는지 부팅마다 한 번 빈 본문으로 확인한다. 구버전
 // 서버는 events 줄을 CSV 에 섞어 넣으므로, 확인 전에는 올리지 않는다.
 bool eventsPushVerified = false;
@@ -566,8 +567,11 @@ void openLog() {
     return;
   }
   if (logFile.size() == 0) {
-    logFile.print("time,ms,bus,id,dlc,data\n");
+    const size_t n = logFile.print("time,ms,bus,id,dlc,data\n");
     logFile.flush();
+    if (n == 0 || logFile.size() == 0) {
+      Serial.println("!! log header write FAIL — flash not writable (FS / FORMAT)");
+    }
   }
   Serial.printf("log file %s  size=%u\n", activePath(),
                 static_cast<unsigned>(logFile.size()));
@@ -1127,6 +1131,7 @@ void printHelp() {
   Serial.println("PUSH URL <https://.../api/canlog>  PUSH KEY <api-key>");
   Serial.println("PUSH NOW  PUSH AUTO ON|OFF  PUSH TEST");
   Serial.println("LOG (기기 동작 로그 최근)  LOG ALL  LOG CLEAR  CANA (A 진단)");
+  Serial.println("FS (플래시 파일·쓰기 테스트)  FORMAT (플래시 초기화)");
 }
 
 void printCanADiag() {
@@ -1187,7 +1192,10 @@ void printStat() {
     if (ef) {
       ef.close();
     }
-    Serial.printf("events=%uB sent=%u write_fail=%lu nas_events=%s\n", esz,
+    Serial.printf("ffat free=%u/%u%s  events=%uB sent=%u write_fail=%lu nas_events=%s\n",
+                  static_cast<unsigned>(FFat.freeBytes()),
+                  static_cast<unsigned>(FFat.totalBytes()),
+                  ffatFormatted ? " (formatted this boot)" : "", esz,
                   static_cast<unsigned>(evtSentOff),
                   static_cast<unsigned long>(evtWriteFail),
                   eventsPushVerified ? "ok"
@@ -1359,6 +1367,12 @@ void handleSerial() {
     clearEvents();
   } else if (cmd == "CANA") {
     printCanADiag();
+  } else if (cmd == "FS") {
+    flushLog();
+    listFs();
+    Serial.printf("write test: %s\n", ffatWriteTest() ? "ok" : "FAIL");
+  } else if (cmd == "FORMAT") {
+    formatFfat("serial FORMAT");
   } else if (cmd == "ECHO ON") {
     echoSerial = true;
     Serial.println("echo ON");
@@ -1517,9 +1531,97 @@ void tickCanRate(uint32_t now) {
   }
 }
 
+// 실제로 파일을 만들고 써 본다. 마운트는 됐는데 쓰기가 전부 실패하는
+// (깨진/꽉 찬) 파일시스템을 잡기 위함.
+bool ffatWriteTest() {
+  const char *p = "/selftest.tmp";
+  FFat.remove(p);
+  File t = FFat.open(p, FILE_WRITE);
+  if (!t) {
+    return false;
+  }
+  const size_t n = t.print("ok\n");
+  t.close();
+  File r = FFat.open(p, FILE_READ);
+  const size_t sz = r ? r.size() : 0;
+  if (r) {
+    r.close();
+  }
+  FFat.remove(p);
+  return n == 3 && sz == 3;
+}
+
+void listFs() {
+  Serial.printf("FFat free=%u total=%u\n", static_cast<unsigned>(FFat.freeBytes()),
+                static_cast<unsigned>(FFat.totalBytes()));
+  File root = FFat.open("/");
+  if (!root) {
+    Serial.println("  (root open fail)");
+    return;
+  }
+  File f = root.openNextFile();
+  while (f) {
+    Serial.printf("  %s  %u\n", f.name(), static_cast<unsigned>(f.size()));
+    f = root.openNextFile();
+  }
+  root.close();
+}
+
+void formatFfat(const char *why) {
+  Serial.printf("FFat FORMAT: %s (모든 로그 삭제)\n", why);
+  flushLog();
+  if (logFile) {
+    logFile.close();
+  }
+  FFat.end();
+  FFat.format();
+  FFat.begin(false);
+  logSlot = 0;
+  sentOff = 0;
+  sentSlot = 0;
+  evtSentOff = 0;
+  savePushPrefs();
+  ffatFormatted = true;
+  openLog();
+  evt("ffat formatted: %s", why);
+}
+
+void mountFfat() {
+  if (!FFat.begin(false)) {
+    Serial.println("FFat mount fail, formatting...");
+    if (!FFat.begin(true)) {
+      Serial.println("FFat format FAIL — USB serial ECHO only");
+      return;
+    }
+    ffatFormatted = true;
+  }
+  listFs();
+  if (ffatWriteTest()) {
+    return;
+  }
+  Serial.println("FFat write test FAIL — remount");
+  FFat.end();
+  if (FFat.begin(false) && ffatWriteTest()) {
+    Serial.println("FFat ok after remount");
+    return;
+  }
+  // 쓰기가 안 되는 파일시스템은 아무것도 남기지 못하므로 새로 만든다.
+  Serial.println("FFat still broken — FORMAT");
+  FFat.end();
+  FFat.format();
+  FFat.begin(false);
+  ffatFormatted = true;
+  Serial.printf("FFat after format: write=%s free=%u\n",
+                ffatWriteTest() ? "ok" : "FAIL",
+                static_cast<unsigned>(FFat.freeBytes()));
+}
+
 void setup() {
+  // 부팅 직후 여러 줄이 한꺼번에 나가므로 USB CDC 버퍼를 키우고, 꽉 차면
+  // 잠깐 기다린다 (0 이면 그 줄들이 그냥 버려져 부팅 메시지가 사라진다).
+  Serial.setTxBufferSize(8192);
   Serial.begin(115200);
-  Serial.setTxTimeoutMs(0);
+  Serial.setTxTimeoutMs(20);
   delay(1500);
   Serial.println();
   Serial.println("T-2CAN FD logger  listen-only");
@@ -1527,23 +1629,21 @@ void setup() {
   Serial.println("CAN stack from chlsw88/T-CAN2  — no TX");
   printHelp();
 
-  if (!FFat.begin(false)) {
-    Serial.println("FFat mount fail, formatting...");
-    if (!FFat.begin(true)) {
-      Serial.println("FFat format FAIL — USB serial ECHO only");
-    }
-  }
+  mountFfat();
   if (FFat.totalBytes()) {
-    Serial.printf("FFat %u / %u bytes free\n",
-                  static_cast<unsigned>(FFat.freeBytes()),
-                  static_cast<unsigned>(FFat.totalBytes()));
     openLog();
   }
   loadWifiPrefs();
-  evt("boot reset=%s fw=%s %s ffat_free=%u psram=%u",
+  evt("boot reset=%s fw=%s %s ffat_free=%u/%u%s psram=%u",
       resetReasonText(esp_reset_reason()), __DATE__, __TIME__,
       static_cast<unsigned>(FFat.freeBytes()),
+      static_cast<unsigned>(FFat.totalBytes()),
+      ffatFormatted ? " (FORMATTED this boot)" : "",
       static_cast<unsigned>(ESP.getPsramSize()));
+  if (evtWriteFail) {
+    Serial.printf("!! events.log write still failing (%lu)\n",
+                  static_cast<unsigned long>(evtWriteFail));
+  }
 
   canAOk = startCanA();
   canBOk = startCanB();
