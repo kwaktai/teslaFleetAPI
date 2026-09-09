@@ -76,6 +76,18 @@ sudo docker-compose up -d --build
 
 확인: 브라우저에서 `http://<NAS내부IP>:8080` 접속 → 상태 페이지가 보이면 성공.
 
+### 코드 업데이트 (GitHub → 재빌드)
+
+파일만 바꾸고 컨테이너를 중지/시작하면 **옛 이미지가 그대로 돕니다.** 아래 한 줄이 GitHub 에서 코드를 받아 덮어쓰고(`.env`, `data/` 는 유지) 이미지를 다시 빌드합니다.
+
+```sh
+cd /volume1/docker/tesla-fleet-api
+sh scripts/update-nas.sh            # 기본 브랜치
+sh scripts/update-nas.sh main       # 브랜치 지정
+```
+
+끝에 `kind: 'events'` 개수가 0 이 아니고, `/canlog` 페이지에 "기기 동작 로그" 표가 보이면 반영된 것입니다.
+
 > 8080 포트가 다른 서비스와 겹치면 `.env` 에 `HOST_PORT=9101` 처럼 원하는 포트를 지정하세요.
 > 이 값은 아래 역방향 프록시의 **대상 포트**와 반드시 같아야 합니다.
 
