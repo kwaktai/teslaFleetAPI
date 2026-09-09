@@ -514,11 +514,18 @@ app.post(
   express.text({ type: '*/*', limit: '8mb' }),
   (req, res) => {
     const body = typeof req.body === 'string' ? req.body : '';
+    if (req.query.kind === 'events') {
+      // 보드가 빈 본문으로 "이 서버가 events 를 아는지" 확인한다. 구버전은 400.
+      if (!body.trim()) {
+        return res.json({ ok: true, kind: 'events', probe: true });
+      }
+      return res.json({ ok: true, kind: 'events', ...saveEvents(body) });
+    }
     if (!body.trim()) {
       return res.status(400).json({ error: 'empty log' });
     }
-    const meta = req.query.kind === 'events' ? saveEvents(body) : saveCanlog(body);
-    res.json({ ok: true, ...meta });
+    const meta = saveCanlog(body);
+    res.json({ ok: true, kind: 'canlog', ...meta });
   }
 );
 

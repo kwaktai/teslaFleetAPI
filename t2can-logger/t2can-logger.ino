@@ -110,6 +110,12 @@ uint32_t lastPushMs = 0;
 uint32_t sentOff = 0;
 uint8_t sentSlot = 0;
 uint32_t evtSentOff = 0;
+uint32_t evtWriteFail = 0;
+// NAS 가 ?kind=events 를 아는지 부팅마다 한 번 빈 본문으로 확인한다. 구버전
+// 서버는 events 줄을 CSV 에 섞어 넣으므로, 확인 전에는 올리지 않는다.
+bool eventsPushVerified = false;
+uint32_t eventsPushRetryMs = 0;
+static const uint32_t kEventsPushRetryEveryMs = 6UL * 60UL * 60UL * 1000UL;
 uint32_t lastHbMs = 0;
 uint32_t hbMarkA = 0;
 uint32_t hbMarkB = 0;
@@ -171,9 +177,12 @@ void evt(const char *fmt, ...) {
   }
   File f = FFat.open(kEvtPath, FILE_APPEND);
   if (!f) {
+    evtWriteFail++;
     return;
   }
-  f.print(line);
+  if (f.print(line) == 0) {
+    evtWriteFail++;
+  }
   const size_t sz = f.size();
   f.close();
   if (sz > kEvtMax) {
@@ -879,7 +888,7 @@ void printHttpCode(int code) {
   Serial.println();
 }
 
-int httpsPostTo(const String &url, const String &body) {
+int httpsPostTo(const String &url, const String &body, String *respOut) {
   WiFiClientSecure client;
   client.setInsecure();
   client.setHandshakeTimeout(20);
@@ -894,6 +903,9 @@ int httpsPostTo(const String &url, const String &body) {
   http.addHeader("Content-Type", "text/csv; charset=utf-8");
   const int code = http.POST(body);
   printHttpCode(code);
+  if (respOut) {
+    *respOut = (code > 0) ? http.getString() : String();
+  }
   http.end();
   pushLastCode = code;
   if (code >= 200 && code < 300) {
@@ -911,7 +923,7 @@ int httpsPostTo(const String &url, const String &body) {
   return code;
 }
 
-int httpsPost(const String &body) { return httpsPostTo(pushUrl, body); }
+int httpsPost(const String &body) { return httpsPostTo(pushUrl, body, nullptr); }
 
 bool uploadRange(const char *path, uint32_t offset, size_t nbytes) {
   File f = FFat.open(path, FILE_READ);
@@ -966,10 +978,40 @@ void pushTest() {
                                              : "PUSH TEST fail");
 }
 
+static String eventsPushUrl() {
+  String url = pushUrl;
+  url += (url.indexOf('?') >= 0) ? "&kind=events" : "?kind=events";
+  return url;
+}
+
+// 빈 본문 POST. 새 서버는 200 + {"kind":"events"}, 구버전은 400 (기록 안 함).
+bool verifyEventsPush() {
+  if (eventsPushVerified) {
+    return true;
+  }
+  if (eventsPushRetryMs && millis() - eventsPushRetryMs < kEventsPushRetryEveryMs) {
+    return false;
+  }
+  Serial.println("PUSH events: NAS 지원 확인 중 ...");
+  String resp;
+  const int code = httpsPostTo(eventsPushUrl(), "\n", &resp);
+  if (code >= 200 && code < 300 && resp.indexOf("\"kind\":\"events\"") >= 0) {
+    eventsPushVerified = true;
+    evt("nas accepts kind=events — device log upload on");
+    return true;
+  }
+  eventsPushRetryMs = millis();
+  evt("nas ignores kind=events (http %d) — NAS 컨테이너를 새 코드로 재배포하세요. "
+      "기기 로그 업로드는 6시간 뒤 재시도", code);
+  return false;
+}
+
 // 기기 동작 로그도 NAS 로 올린다 (?kind=events). 한 번에 한 조각.
 bool pushEvents() {
   File f = FFat.open(kEvtPath, FILE_READ);
   if (!f) {
+    Serial.printf("PUSH events: %s 없음 (write_fail=%lu)\n", kEvtPath,
+                  static_cast<unsigned long>(evtWriteFail));
     return true;
   }
   const uint32_t sz = f.size();
@@ -978,11 +1020,16 @@ bool pushEvents() {
     evtSentOff = 0;
   }
   if (evtSentOff >= sz) {
+    Serial.printf("PUSH events caught up @%u\n", static_cast<unsigned>(sz));
     return true;
+  }
+  if (!verifyEventsPush()) {
+    return false;
   }
   const size_t n = (sz - evtSentOff) > kPushChunk ? kPushChunk : (sz - evtSentOff);
   File src = FFat.open(kEvtPath, FILE_READ);
   if (!src || !src.seek(evtSentOff)) {
+    Serial.println("PUSH events: open/seek fail");
     return false;
   }
   String chunk;
@@ -991,11 +1038,9 @@ bool pushEvents() {
     chunk += static_cast<char>(src.read());
   }
   src.close();
-  String url = pushUrl;
-  url += (url.indexOf('?') >= 0) ? "&kind=events" : "?kind=events";
   Serial.printf("PUSH events +%u %uB ...\n", static_cast<unsigned>(evtSentOff),
                 static_cast<unsigned>(chunk.length()));
-  const int code = httpsPostTo(url, chunk);
+  const int code = httpsPostTo(eventsPushUrl(), chunk, nullptr);
   if (code < 200 || code >= 300) {
     return false;
   }
@@ -1136,6 +1181,19 @@ void printStat() {
   Serial.printf("time=%s  ntp=%s  reset=%s  heap=%u\n", when,
                 ntpOk ? "ok" : "wait", resetReasonText(esp_reset_reason()),
                 static_cast<unsigned>(ESP.getFreeHeap()));
+  {
+    File ef = FFat.open(kEvtPath, FILE_READ);
+    const unsigned esz = ef ? static_cast<unsigned>(ef.size()) : 0;
+    if (ef) {
+      ef.close();
+    }
+    Serial.printf("events=%uB sent=%u write_fail=%lu nas_events=%s\n", esz,
+                  static_cast<unsigned>(evtSentOff),
+                  static_cast<unsigned long>(evtWriteFail),
+                  eventsPushVerified ? "ok"
+                                     : (eventsPushRetryMs ? "unsupported"
+                                                          : "unchecked"));
+  }
   if (canAOk) {
     printCanADiag();
   } else {
