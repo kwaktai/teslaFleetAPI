@@ -99,13 +99,15 @@ python pull_log.py --port COM5
 
 CAN 프레임과 별도로 보드가 자기 동작을 `/events.log` 에 남깁니다.
 
-- `boot reset=...` 부팅과 **재시작 원인** (`poweron`, `BROWNOUT` 전원 부족, `PANIC` 크래시, `WDT`, `usb` 는 PC 가 시리얼 포트를 열어 리셋한 것)
+- `boot reset=... raw=N` 부팅과 **재시작 원인** (`poweron`, `BROWNOUT` 전원 부족, `PANIC` 크래시, `WDT`, `usb` 는 PC 가 시리얼 포트를 열어 리셋한 것). `raw` 는 칩이 보고한 원래 코드 (1 poweron, 15 brownout, 19 clock glitch, 21/22 usb, 23 power glitch) — `unknown` 일 때 구분용. `poweron` 인데 `(RTC 메모리 유지 → 완전 정전 아님)` 이 붙으면 전원이 완전히 나간 게 아니라 리셋핀 또는 순간 전압 저하로 재시작한 것입니다.
+- `!! N boot(s) before this one died before writing the log (reasons: ...)` 이 부팅 앞에 **로그 한 줄도 못 쓰고 죽은 부팅**이 N 번 있었다는 뜻 (부팅 후 2초 안에 다시 리셋되면 events.log 에 아무것도 안 남으므로 RTC 메모리로 셉니다). 전원을 꽂을 때마다 여러 번 리셋되는 전원 문제가 여기서 드러납니다.
 - `CRASH task=... pc=0x... cause=...` / `CRASH bt: ...` 직전 부팅이 크래시였으면 어느 태스크가 어디서 죽었는지 (코어덤프 요약). 이 두 줄을 그대로 전달하면 함수명으로 풀 수 있습니다.
 - `LAST RUN ended in loop=FLASH WRITE (up=83.412s) push=TLS POST csv ...` 재시작 직전에 loop 와 업로드 태스크가 각각 무엇을 하던 중이었는지 (RTC 메모리에 남긴 것). 플래시 쓰기 중에 죽으면 코어덤프가 안 남는데, 이 줄은 남습니다.
 - `CAN B traffic start / stop` 차가 깨어나 버스가 살고, 잠들어 조용해진 시점
-- `sta join / sta ok / sta lost` Wi-Fi 연결·끊김 (IP, 신호세기, 게이트웨이, DNS)
+- `sta join / sta ok / sta lost` Wi-Fi 연결·끊김 (IP, 신호세기, 게이트웨이, DNS). `sta lost` 는 4초 넘게 끊겨 있을 때만 찍힙니다.
+- `wifi LINK DOWN #n reason=200 BEACON_TIMEOUT ... / wifi link up ap=... ch=... / wifi got ip` Wi-Fi **드라이버 수준**의 끊김·재접속. 몇 초 안에 저절로 다시 붙는 짧은 끊김은 `sta lost` 로는 안 보이고 여기서만 보입니다. `reason` 이 8(`ASSOC_LEAVE`)이면 보드가 스스로 끊은 것(망 전환·재접속 명령), 200(`BEACON_TIMEOUT`)/201(`NO_AP_FOUND`)이면 AP 신호가 사라진 것, 2/3/4 면 AP 쪽이 끊은 것, 15/202 는 비밀번호·인증 문제입니다. `(1분 안에 또)` 는 직전 끊김 뒤 1분이 안 됐다는 표시.
 - `push ok / push FAIL http 401 / push FAIL connection refused` NAS 업로드 결과 (`(backlog)` 는 아직 더 올릴 게 남았다는 뜻)
-- `hb ...` 부팅 20초 뒤 한 번, 그 뒤 1분마다: 지난 구간 A/B 프레임 수, `skip`(간격 제한), `drop`(큐 넘침), `q`(큐 사용률), `wr`(플래시 쓰기 KB/s), 파일 크기, Wi-Fi, PUSH 성공/실패 누계와 올린 위치, 힙
+- `hb ...` 부팅 20초 뒤 한 번, 그 뒤 1분마다: 지난 구간 A/B 프레임 수, `skip`(간격 제한), `drop`(큐 넘침), `q`(큐 사용률), `wr`(플래시 쓰기 KB/s), 파일 크기, Wi-Fi(`wifi_down` 은 이 부팅 뒤 드라이버 끊김 누계), PUSH 성공/실패 누계와 올린 위치, 힙
 - `A chip=... → 판정` 1분마다 CAN A(MCP2518FD) 레지스터 진단 (아래)
 
 꺼내는 방법 세 가지:

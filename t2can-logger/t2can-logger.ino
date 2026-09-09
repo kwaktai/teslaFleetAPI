@@ -33,6 +33,7 @@
 #include <time.h>
 #include <stdarg.h>
 #include <esp_system.h>
+#include "rom/rtc.h"
 #include "esp_core_dump.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/message_buffer.h"
@@ -143,6 +144,28 @@ RTC_NOINIT_ATTR uint32_t bcPushMs;
 RTC_NOINIT_ATTR uint32_t bcFramesB;
 RTC_NOINIT_ATTR uint32_t bcQueueFree;
 RTC_NOINIT_ATTR uint32_t bcHeap;
+// 부팅했지만 기기 로그에 'boot' 줄을 남기기 전에 다시 죽은 횟수. FFat 마운트
+// (약 2초) 전에 전원이 흔들려 리셋되면 로그엔 아무것도 없다 — 이걸로 센다.
+RTC_NOINIT_ATTR uint32_t bcUnlogged;
+RTC_NOINIT_ATTR uint8_t bcUnloggedReason[8];
+
+// Wi-Fi 드라이버 이벤트(연결/끊김 이유/IP). 콜백은 이벤트 태스크에서 오므로
+// 여기 링에만 적고 loop() 가 기기 로그로 옮긴다. 4초 안에 저절로 다시 붙는
+// 짧은 끊김은 sta lost 로 잡히지 않으므로 이게 있어야 보인다.
+struct WifiEvtRec {
+  uint32_t ms;
+  uint8_t kind;
+  uint8_t reason;
+  uint8_t ch;
+  int8_t rssi;
+  uint8_t bssid[6];
+  uint32_t ip;
+};
+static WifiEvtRec wifiEvts[16];
+volatile uint8_t wifiEvtHead = 0;
+volatile uint8_t wifiEvtTail = 0;
+uint32_t wifiDiscCount = 0;
+uint32_t wifiLastDiscMs = 0;
 
 // CAN 수신은 별도 태스크(core 1, 높은 우선순위)가 한다. Wi-Fi 스캔이나
 // HTTPS PUSH 로 loop() 가 몇 초 멈춰도 프레임을 잃지 않게 하기 위함.
@@ -332,6 +355,117 @@ const char *pushPhaseText(uint32_t p) {
     case PP_VERIFY: return "verify events";
     case PP_TEST: return "PUSH TEST";
     default: return "?";
+  }
+}
+
+// wifi_err_reason_t → 사람이 읽는 이유. 괄호는 흔한 원인.
+const char *wifiReasonText(uint8_t r) {
+  switch (r) {
+    case 1: return "UNSPECIFIED";
+    case 2: return "AUTH_EXPIRE (AP 가 인증을 끊음)";
+    case 3: return "AUTH_LEAVE (AP 가 끊음)";
+    case 4: return "ASSOC_EXPIRE (AP 가 세션 만료)";
+    case 5: return "ASSOC_TOOMANY (AP 접속 수 초과)";
+    case 6: return "NOT_AUTHED";
+    case 7: return "NOT_ASSOCED";
+    case 8: return "ASSOC_LEAVE (보드가 스스로 끊음 — 재접속/망 전환)";
+    case 9: return "ASSOC_NOT_AUTHED";
+    case 15: return "4WAY_HANDSHAKE_TIMEOUT (비밀번호 틀림 또는 AP 응답 지연)";
+    case 23: return "802_1X_AUTH_FAILED";
+    case 200: return "BEACON_TIMEOUT (AP 신호가 끊김 — 거리/전원/AP 재시작)";
+    case 201: return "NO_AP_FOUND (AP 가 안 보임)";
+    case 202: return "AUTH_FAIL (인증 실패 — 비밀번호)";
+    case 203: return "ASSOC_FAIL";
+    case 204: return "HANDSHAKE_TIMEOUT";
+    case 205: return "CONNECTION_FAIL";
+    case 206: return "AP_TSF_RESET (AP 재시작)";
+    case 207: return "ROAMING";
+    default: return "?";
+  }
+}
+
+enum WifiEvtKind : uint8_t {
+  WE_STA_CONNECTED = 1, WE_STA_DISCONNECTED, WE_GOT_IP, WE_LOST_IP,
+  WE_AP_CLIENT_JOIN, WE_AP_CLIENT_LEAVE, WE_STA_START, WE_STA_STOP
+};
+
+void pushWifiEvt(const WifiEvtRec &r) {
+  const uint8_t next = (wifiEvtHead + 1) % 16;
+  if (next == wifiEvtTail) {
+    return;  // 링이 꽉 찼으면 버림
+  }
+  wifiEvts[wifiEvtHead] = r;
+  wifiEvtHead = next;
+}
+
+void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  WifiEvtRec r = {};
+  r.ms = millis();
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_START: r.kind = WE_STA_START; break;
+    case ARDUINO_EVENT_WIFI_STA_STOP: r.kind = WE_STA_STOP; break;
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      r.kind = WE_STA_CONNECTED;
+      r.ch = info.wifi_sta_connected.channel;
+      memcpy(r.bssid, info.wifi_sta_connected.bssid, 6);
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      r.kind = WE_STA_DISCONNECTED;
+      r.reason = info.wifi_sta_disconnected.reason;
+      r.rssi = info.wifi_sta_disconnected.rssi;
+      memcpy(r.bssid, info.wifi_sta_disconnected.bssid, 6);
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      r.kind = WE_GOT_IP;
+      r.ip = info.got_ip.ip_info.ip.addr;
+      break;
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP: r.kind = WE_LOST_IP; break;
+    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
+      r.kind = WE_AP_CLIENT_JOIN;
+      memcpy(r.bssid, info.wifi_ap_staconnected.mac, 6);
+      break;
+    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
+      r.kind = WE_AP_CLIENT_LEAVE;
+      memcpy(r.bssid, info.wifi_ap_stadisconnected.mac, 6);
+      break;
+    default: return;
+  }
+  pushWifiEvt(r);
+}
+
+// loop() 에서: 링에 쌓인 Wi-Fi 이벤트를 기기 로그로.
+void drainWifiEvents() {
+  while (wifiEvtTail != wifiEvtHead) {
+    const WifiEvtRec r = wifiEvts[wifiEvtTail];
+    wifiEvtTail = (wifiEvtTail + 1) % 16;
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X", r.bssid[0],
+             r.bssid[1], r.bssid[2], r.bssid[3], r.bssid[4], r.bssid[5]);
+    const unsigned long t = r.ms;
+    switch (r.kind) {
+      case WE_STA_START: evt("wifi sta start (t=%lums)", t); break;
+      case WE_STA_STOP: evt("wifi sta stop (t=%lums)", t); break;
+      case WE_STA_CONNECTED:
+        evt("wifi link up ap=%s ch=%u (t=%lums)", mac, r.ch, t);
+        break;
+      case WE_STA_DISCONNECTED:
+        wifiDiscCount++;
+        evt("wifi LINK DOWN #%lu reason=%u %s rssi=%d ap=%s%s (t=%lums)",
+            static_cast<unsigned long>(wifiDiscCount), r.reason,
+            wifiReasonText(r.reason), r.rssi, mac,
+            (wifiLastDiscMs && r.ms - wifiLastDiscMs < 60000) ? " (1분 안에 또)" : "",
+            t);
+        wifiLastDiscMs = r.ms;
+        break;
+      case WE_GOT_IP:
+        evt("wifi got ip %u.%u.%u.%u (t=%lums)", r.ip & 0xFF, (r.ip >> 8) & 0xFF,
+            (r.ip >> 16) & 0xFF, (r.ip >> 24) & 0xFF, t);
+        break;
+      case WE_LOST_IP: evt("wifi lost ip (t=%lums)", t); break;
+      case WE_AP_CLIENT_JOIN: evt("board AP: client %s joined", mac); break;
+      case WE_AP_CLIENT_LEAVE: evt("board AP: client %s left", mac); break;
+      default: break;
+    }
   }
 }
 
@@ -1700,7 +1834,8 @@ void heartbeat() {
   const unsigned qUsedPct =
       canQueueBytes ? static_cast<unsigned>(100 - (qFree * 100) / canQueueBytes) : 0;
   evt("hb A+%lu B+%lu skip=%lu drop=%lu Bmiss=%lu Bover=%lu q=%u%% wr=%luKB/s "
-      "log=%s:%u wifi=%s ssid=%s rssi=%d push=%s ok=%lu fail=%lu last=%d sent=%u heap=%u",
+      "log=%s:%u wifi=%s ssid=%s rssi=%d wifi_down=%lu push=%s ok=%lu fail=%lu last=%d "
+      "sent=%u heap=%u",
       static_cast<unsigned long>(dA), static_cast<unsigned long>(dB),
       static_cast<unsigned long>(rateSkipped),
       static_cast<unsigned long>(dropped), static_cast<unsigned long>(twaiMissed),
@@ -1709,6 +1844,7 @@ void heartbeat() {
       static_cast<unsigned>(logFile ? logFile.size() + lineUsed : 0),
       wifiOn ? (sta ? "sta" : (staSearching ? "search" : "ap")) : "off",
       sta ? staSsid.c_str() : "-", sta ? WiFi.RSSI() : 0,
+      static_cast<unsigned long>(wifiDiscCount),
       pushAuto ? (pushBusy ? "busy" : "auto") : "off",
       static_cast<unsigned long>(pushOkCount),
       static_cast<unsigned long>(pushFailCount), pushLastCode,
@@ -2175,12 +2311,25 @@ void setup() {
   fsMux = xSemaphoreCreateRecursiveMutex();
   evtMux = xSemaphoreCreateRecursiveMutex();
   prefsMux = xSemaphoreCreateRecursiveMutex();
+  WiFi.onEvent(onWifiEvent);
   const esp_reset_reason_t rr = esp_reset_reason();
   // 브레드크럼은 FFat 보다 먼저 읽는다 (마운트/포맷 중에 죽어도 남게).
   const bool bcValid = bcMagic == kBcMagic;
   const uint32_t lastPhase = bcPhase, lastMs = bcMs, lastPushPh = bcPushPhase,
                  lastPushMsV = bcPushMs, lastFramesB = bcFramesB,
                  lastQFree = bcQueueFree, lastHeap = bcHeap;
+  if (!bcValid) {
+    bcUnlogged = 0;
+    memset(bcUnloggedReason, 0, sizeof(bcUnloggedReason));
+  }
+  // 이 부팅도 일단 "로그 못 남긴 부팅" 으로 세어 두고, boot 줄을 쓰면 0 으로.
+  if (bcUnlogged < 255) {
+    bcUnloggedReason[bcUnlogged % 8] = static_cast<uint8_t>(rr);
+    bcUnlogged++;
+  }
+  const uint32_t unloggedBefore = bcUnlogged - 1;
+  uint8_t unloggedReasons[8];
+  memcpy(unloggedReasons, bcUnloggedReason, sizeof(unloggedReasons));
   bcMagic = kBcMagic;
   bc(PH_SETUP_FS);
 
@@ -2189,14 +2338,21 @@ void setup() {
     openLog();
   }
   loadWifiPrefs();
-  evt("boot reset=%s fw=%s %s ffat_free=%u/%u%s psram=%u rate=%lums",
-      resetReasonText(rr), __DATE__, __TIME__,
+  // raw = ROM 이 보고한 리셋 코드 (rom/rtc.h RESET_REASON). unknown 일 때
+  // 무엇인지 구분하려고 남긴다: 1 poweron, 15 brownout, 19 clock glitch,
+  // 21/22 usb, 23 power glitch.
+  evt("boot reset=%s raw=%d%s fw=%s %s ffat_free=%u/%u%s psram=%u rate=%lums",
+      resetReasonText(rr), static_cast<int>(rtc_get_reset_reason(0)),
+      (rr == ESP_RST_POWERON && bcValid) ? " (RTC 메모리 유지 → 완전 정전 아님: 리셋핀/순간 전압 저하)" : "",
+      __DATE__, __TIME__,
       static_cast<unsigned>(FFat.freeBytes()),
       static_cast<unsigned>(FFat.totalBytes()),
       ffatFormatted ? " (FORMATTED this boot)" : "",
       static_cast<unsigned>(ESP.getPsramSize()),
       static_cast<unsigned long>(logRateMs));
-  if (bcValid && rr != ESP_RST_POWERON && rr != ESP_RST_UNKNOWN) {
+  // 브레드크럼이 살아 있으면 리셋 종류와 상관없이 직전 실행 상태를 남긴다
+  // (poweron 이라도 RTC 메모리가 유지됐다면 직전 실행이 몇 초 전이었다는 뜻).
+  if (bcValid) {
     evt("LAST RUN ended in loop=%s (up=%lu.%03lus) push=%s (up=%lu.%03lus) "
         "framesB=%lu queue_free=%luKB heap=%lu",
         phaseText(lastPhase), static_cast<unsigned long>(lastMs / 1000),
@@ -2206,6 +2362,22 @@ void setup() {
         static_cast<unsigned long>(lastFramesB),
         static_cast<unsigned long>(lastQFree / 1024),
         static_cast<unsigned long>(lastHeap));
+  }
+  if (unloggedBefore > 0 && bcValid) {
+    char reasons[8 * 24];
+    int pos = 0;
+    const uint32_t n = unloggedBefore > 8 ? 8 : unloggedBefore;
+    // 링에서 이 부팅(마지막) 앞의 n 개
+    for (uint32_t i = 0; i < n && pos < static_cast<int>(sizeof(reasons)) - 24; i++) {
+      const uint32_t idx = (bcUnlogged - 2 - i) % 8;
+      pos += snprintf(reasons + pos, sizeof(reasons) - pos, "%s%s", i ? ", " : "",
+                      resetReasonText(static_cast<esp_reset_reason_t>(unloggedReasons[idx])));
+    }
+    evt("!! %lu boot(s) before this one died before writing the log (reasons, newest first: %s)",
+        static_cast<unsigned long>(unloggedBefore), reasons);
+  }
+  if (!evtWriteFail) {
+    bcUnlogged = 0;
   }
   bcPushPhase = PP_IDLE;
   bcPushMs = 0;
@@ -2240,6 +2412,7 @@ void loop() {
   }
   bc(PH_SERIAL);
   handleSerial();
+  drainWifiEvents();
   if (wifiOn) {
     bc(PH_HTTP);
     http.handleClient();
