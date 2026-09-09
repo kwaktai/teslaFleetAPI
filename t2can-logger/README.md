@@ -84,7 +84,8 @@ python pull_log.py --port COM5
 
 CAN 프레임과 별도로 보드가 자기 동작을 `/events.log` 에 남깁니다.
 
-- `boot reset=...` 부팅과 **재시작 원인** (`poweron`, `BROWNOUT` 전원 부족, `PANIC` 크래시, `WDT`)
+- `boot reset=...` 부팅과 **재시작 원인** (`poweron`, `BROWNOUT` 전원 부족, `PANIC` 크래시, `WDT`, `usb` 는 PC 가 시리얼 포트를 열어 리셋한 것)
+- `CRASH task=... pc=0x... cause=...` / `CRASH bt: ...` 직전 부팅이 크래시였으면 어느 태스크가 어디서 죽었는지 (코어덤프 요약). 이 두 줄을 그대로 전달하면 함수명으로 풀 수 있습니다.
 - `sta join / sta ok / sta lost` Wi-Fi 연결·끊김 (IP, 신호세기, 게이트웨이, DNS)
 - `push ok / push FAIL http 401 / push FAIL connection refused` NAS 업로드 결과
 - `hb ...` 1분마다: 지난 1분 A/B 프레임 수, 드롭, 파일 크기, Wi-Fi, PUSH 성공/실패 누계, 힙

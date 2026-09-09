@@ -28,6 +28,7 @@
 #include <time.h>
 #include <stdarg.h>
 #include <esp_system.h>
+#include "esp_core_dump.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/message_buffer.h"
 #include "freertos/task.h"
@@ -118,6 +119,7 @@ bool eventsPushVerified = false;
 uint32_t eventsPushRetryMs = 0;
 static const uint32_t kEventsPushRetryEveryMs = 6UL * 60UL * 60UL * 1000UL;
 uint32_t lastHbMs = 0;
+uint32_t hbCount = 0;
 uint32_t hbMarkA = 0;
 uint32_t hbMarkB = 0;
 uint32_t pushOkCount = 0;
@@ -206,8 +208,45 @@ const char *resetReasonText(esp_reset_reason_t r) {
     case ESP_RST_DEEPSLEEP: return "deepsleep";
     case ESP_RST_BROWNOUT: return "BROWNOUT(power dip)";
     case ESP_RST_SDIO: return "sdio";
+    case ESP_RST_USB: return "usb(PC opened serial)";
+    case ESP_RST_JTAG: return "jtag";
+    case ESP_RST_EFUSE: return "efuse";
+    case ESP_RST_PWR_GLITCH: return "PWR-GLITCH";
+    case ESP_RST_CPU_LOCKUP: return "CPU-LOCKUP";
     default: return "unknown";
   }
+}
+
+// 직전 부팅이 PANIC 이었으면 코어덤프 파티션에 요약이 남아 있다. 어느 태스크가
+// 어디서 죽었는지 기기 로그에 적고 지운다. 주소는 같은 코드로 빌드한 .elf 에
+// addr2line 을 돌려 함수명으로 바꿀 수 있다.
+void reportCoreDump() {
+  if (esp_core_dump_image_check() != ESP_OK) {
+    return;
+  }
+  esp_core_dump_summary_t *s = static_cast<esp_core_dump_summary_t *>(
+      calloc(1, sizeof(esp_core_dump_summary_t)));
+  if (s && esp_core_dump_get_summary(s) == ESP_OK) {
+    char reason[160];
+    reason[0] = 0;
+    esp_core_dump_get_panic_reason(reason, sizeof(reason));
+    evt("CRASH task=%s pc=0x%08lx cause=%lu vaddr=0x%08lx %s", s->exc_task,
+        static_cast<unsigned long>(s->exc_pc),
+        static_cast<unsigned long>(s->ex_info.exc_cause),
+        static_cast<unsigned long>(s->ex_info.exc_vaddr), reason);
+    char bt[16 * 11 + 8];
+    int pos = 0;
+    const uint32_t depth = s->exc_bt_info.depth > 16 ? 16 : s->exc_bt_info.depth;
+    for (uint32_t i = 0; i < depth && pos < static_cast<int>(sizeof(bt)) - 12; i++) {
+      pos += snprintf(bt + pos, sizeof(bt) - pos, "0x%08lx ",
+                      static_cast<unsigned long>(s->exc_bt_info.bt[i]));
+    }
+    evt("CRASH bt%s: %s", s->exc_bt_info.corrupted ? "(corrupt)" : "", bt);
+  } else {
+    evt("CRASH coredump present but summary unreadable");
+  }
+  free(s);
+  esp_core_dump_image_erase();
 }
 
 // CAN A(MCP2518FD) 가 왜 조용한지 레지스터로 가른다.
@@ -1439,7 +1478,13 @@ void handleSerial() {
 }
 
 bool startCanA() {
-  if (!canA.begin(CANFD::BITRATE(500000, 1))) {
+  // 크래시 직후엔 MCP2518FD 가 SPI 명령 중간에 멈춰 있을 수 있어 한 번 더 시도.
+  bool ok = canA.begin(CANFD::BITRATE(500000, 1));
+  if (!ok) {
+    delay(100);
+    ok = canA.begin(CANFD::BITRATE(500000, 1));
+  }
+  if (!ok) {
     evt("CAN A init FAIL (MCP2518FD not in listen-only / no SPI reply)");
     printCanADiag();
     return false;
@@ -1474,13 +1519,14 @@ bool pollOne(CanChannel &ch, bool ok, char bus, volatile uint32_t &total) {
   return got;
 }
 
+// 한 번에 최대 64+64 프레임을 처리한 뒤 반드시 한 틱(1ms) 쉰다. 버스가 바쁠 때
+// (초당 3000 프레임) 이 태스크가 쉬지 않으면 같은 코어의 loop() 가 굶어
+// 플래시 쓰기·Wi-Fi 가 멈추고 큐가 넘친다. 1ms 에 3~4 프레임이라 여유는 충분.
 void canTask(void *) {
   for (;;) {
-    const bool gotB = pollOne(canB, canBOk, 'B', framesB);
-    const bool gotA = pollOne(canA, canAOk, 'A', framesA);
-    if (!gotA && !gotB) {
-      vTaskDelay(1);
-    }
+    pollOne(canB, canBOk, 'B', framesB);
+    pollOne(canA, canAOk, 'A', framesA);
+    vTaskDelay(1);
   }
 }
 
@@ -1503,7 +1549,7 @@ void startCanTask() {
     Serial.println("CAN queue alloc FAIL — polling in loop()");
     return;
   }
-  xTaskCreatePinnedToCore(canTask, "can-rx", 6144, nullptr, 3, &canTaskHandle,
+  xTaskCreatePinnedToCore(canTask, "can-rx", 8192, nullptr, 3, &canTaskHandle,
                           1);
   Serial.printf("CAN rx task on core 1, queue %u KB\n",
                 static_cast<unsigned>(canQueueBytes / 1024));
@@ -1644,6 +1690,7 @@ void setup() {
     Serial.printf("!! events.log write still failing (%lu)\n",
                   static_cast<unsigned long>(evtWriteFail));
   }
+  reportCoreDump();
 
   canAOk = startCanA();
   canBOk = startCanB();
@@ -1673,8 +1720,11 @@ void loop() {
     rotateIfNeeded();
   }
   tickCanRate(now);
-  if (now - lastHbMs >= kHbEveryMs) {
+  // 첫 상태 줄은 20초에 — 차에서 1분을 못 버티고 죽을 때도 A/B 수신량과
+  // A 판정을 남기기 위함. 그 뒤는 1분마다.
+  if (now - lastHbMs >= (hbCount == 0 ? 20000UL : kHbEveryMs)) {
     lastHbMs = now;
+    hbCount++;
     heartbeat();
   }
   if (wifiOn && wantSta && staNetCount) {
