@@ -148,8 +148,8 @@ bool TwaiChannel::begin(uint32_t bitrate) {
     return false;
   }
 
-  periph_module_reset(PERIPH_TWAI_MODULE);
   periph_module_enable(PERIPH_TWAI_MODULE);
+  periph_module_reset(PERIPH_TWAI_MODULE);
 
   enterReset();
   // 리슨온리: ACK 도 에러 프레임도 내지 않는다. stm(self test)=0.
