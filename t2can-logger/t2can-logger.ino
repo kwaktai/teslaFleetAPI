@@ -15,7 +15,7 @@
  *   WIFI ON|OFF  WIFI AP  WIFI JOIN <ssid> <pass>  WIFI LIST
  *   WIFI FORGET <ssid>  WIFI SCAN
  *   PUSH URL  PUSH KEY  PUSH NOW  PUSH AUTO ON|OFF
- *   LOG  LOG RATE <ms>  CANA  FS  FORMAT
+ *   LOG  LOG RATE <ms>  CANA  CANA SCAN  CANA RATE <bps>  FS  FORMAT
  *
  * 구조: can-rx 태스크(core 1) 수신 → ID 별 간격 제한 → PSRAM 큐 →
  *       loop() 이 32KB 씩 플래시에 쓰고 5초마다 sync
@@ -105,6 +105,10 @@ bool logDirty = false;
 uint32_t lastSyncMs = 0;
 uint32_t bytesWritten = 0;   // 플래시에 실제로 쓴 CSV 바이트 (hb 에서 KB/s)
 uint32_t hbMarkWritten = 0;
+
+// CAN A(MCP2518FD) 비트레이트. X437 Vehicle 은 500k 이지만 CANA RATE 로 바꿔
+// 저장할 수 있다 (CANA SCAN 으로 어느 속도에 프레임이 잡히는지 확인).
+uint32_t canARateBps = CAN0_BITRATE;
 
 // ID 별 마지막 기록 시각. 11비트 ID 는 직접 인덱스, 29비트는 작은 해시 표.
 uint32_t logRateMs = kLogRateDefaultMs;
@@ -531,6 +535,21 @@ void reportCoreDump() {
   esp_core_dump_image_erase();
 }
 
+// "40.0MHz(lib 40)" — 실측 크리스털과 라이브러리에 넘긴 클럭. 둘이 다르면
+// 비트타이밍이 어긋난 것이니 이 값을 그대로 알려달라고 README 에 적어 둠.
+const char *canAXtalText() {
+  static char buf[32];
+  const uint32_t hz = canA.sysClockHz();
+  if (hz == 0) {
+    snprintf(buf, sizeof(buf), "?(lib %u)", canA.clockMhz());
+  } else {
+    snprintf(buf, sizeof(buf), "%lu.%luMHz(lib %u)",
+             static_cast<unsigned long>(hz / 1000000UL),
+             static_cast<unsigned long>((hz / 100000UL) % 10), canA.clockMhz());
+  }
+  return buf;
+}
+
 // CAN A(MCP2518FD) 가 왜 조용한지 레지스터로 가른다.
 // 결과 한 줄 + 판정을 out 에 쓴다.
 void describeCanA(char *out, size_t outLen, uint32_t framesSince) {
@@ -555,15 +574,16 @@ void describeCanA(char *out, size_t outLen, uint32_t framesSince) {
   } else if (d.efmsg > 0) {
     verdict = "칩은 프레임을 받는데 FIFO 못 읽음 → 드라이버/필터";
   } else if (anyErr) {
-    verdict = "신호는 있는데 프레임 오류 → 속도 불일치 또는 H/L 바뀜";
+    verdict = "신호는 있는데 프레임 오류 → 속도 불일치(CANA SCAN 으로 확인) 또는 H/L 바뀜";
   } else {
     verdict = "버스 신호 없음 → 9/10 배선·커넥터 또는 그 버스가 잠듦";
   }
   snprintf(out, outLen,
-           "A chip=%s osc=%s mode=%u rec=%u tec=%u efmsg=%u rxerr=%u "
-           "stuff=%u form=%u crc=%u bit0=%u bit1=%u ack=%u rxov=%u int=%s "
-           "frames=%lu → %s",
-           d.alive ? "ok" : "NONE", d.oscReady ? "ok" : "no", d.opmod, d.rec,
+           "A chip=%s osc=%s xtal=%s mode=%u rate=%luk rec=%u tec=%u efmsg=%u "
+           "rxerr=%u stuff=%u form=%u crc=%u bit0=%u bit1=%u ack=%u rxov=%u "
+           "int=%s frames=%lu → %s",
+           d.alive ? "ok" : "NONE", d.oscReady ? "ok" : "no", canAXtalText(),
+           d.opmod, static_cast<unsigned long>(canARateBps / 1000), d.rec,
            d.tec, d.efmsg, d.nrerr, d.stuffErr, d.formErr, d.crcErr, d.bit0Err,
            d.bit1Err, d.ackErr, d.rxOverflow, d.intLow ? "low" : "high",
            static_cast<unsigned long>(framesSince), verdict);
@@ -699,6 +719,7 @@ void loadWifiPrefs() {
   sentSlot = static_cast<uint8_t>(prefs.getUChar("sentSlot", 0));
   evtSentOff = prefs.getUInt("evtOff", 0);
   logRateMs = prefs.getUInt("logRate", kLogRateDefaultMs);
+  canARateBps = prefs.getUInt("canARate", CAN0_BITRATE);
   staNetCount = 0;
   if (nssid != 255) {
     const uint8_t n = nssid > kMaxStaNets ? kMaxStaNets : nssid;
@@ -764,6 +785,7 @@ void savePushPrefs() {
   prefs.putUChar("sentSlot", sentSlot);
   prefs.putUInt("evtOff", evtSentOff);
   prefs.putUInt("logRate", logRateMs);
+  prefs.putUInt("canARate", canARateBps);
   prefs.end();
 }
 
@@ -1757,6 +1779,7 @@ void printHelp() {
   Serial.println("PUSH URL <https://.../api/canlog>  PUSH KEY <api-key>");
   Serial.println("PUSH NOW  PUSH AUTO ON|OFF  PUSH TEST");
   Serial.println("LOG (기기 동작 로그 최근)  LOG ALL  LOG CLEAR  CANA (A 진단)");
+  Serial.println("CANA SCAN (A 속도 찾기, 차 깨어 있을 때)  CANA RATE <bps> (A 속도 저장)");
   Serial.println("LOG RATE <ms> (같은 ID 기록 간격, 기본 100, 0=전부)");
   Serial.println("FS (플래시 파일·쓰기 테스트)  FORMAT (플래시 초기화)");
 }
@@ -2041,6 +2064,17 @@ void handleSerial() {
     clearEvents();
   } else if (cmd == "CANA") {
     printCanADiag();
+  } else if (cmd == "CANA SCAN") {
+    scanCanARates();
+  } else if (cmd.startsWith("CANA RATE")) {
+    String rest = skipWord(skipWord(raw));
+    rest.trim();
+    if (!rest.length()) {
+      Serial.printf("CANA RATE %luk (xtal=%s)\n",
+                    static_cast<unsigned long>(canARateBps / 1000), canAXtalText());
+    } else {
+      setCanARate(static_cast<uint32_t>(rest.toInt()));
+    }
   } else if (cmd == "FS") {
     flushLog();
     listFs();
@@ -2135,18 +2169,78 @@ void handleSerial() {
 
 bool startCanA() {
   // 크래시 직후엔 MCP2518FD 가 SPI 명령 중간에 멈춰 있을 수 있어 한 번 더 시도.
-  bool ok = canA.begin(CANFD::BITRATE(500000, 1));
+  bool ok = canA.begin(CANFD::BITRATE(canARateBps, 1));
   if (!ok) {
     delay(100);
-    ok = canA.begin(CANFD::BITRATE(500000, 1));
+    ok = canA.begin(CANFD::BITRATE(canARateBps, 1));
   }
   if (!ok) {
-    evt("CAN A init FAIL (MCP2518FD not in listen-only / no SPI reply)");
+    evt("CAN A init FAIL (MCP2518FD not in listen-only / no SPI reply) xtal=%s",
+        canAXtalText());
     printCanADiag();
     return false;
   }
-  evt("CAN A MCP2518FD listen-only 500k OK (X437 9/10)");
+  evt("CAN A MCP2518FD listen-only %luk OK (X437 9/10) xtal=%s",
+      static_cast<unsigned long>(canARateBps / 1000), canAXtalText());
   return true;
+}
+
+// CANA RATE <bps>: A 속도를 바꾸고 저장한 뒤 바로 다시 연다. 125/250/500/1000
+// 처럼 k 단위로 써도 된다.
+void setCanARate(uint32_t bps) {
+  if (bps > 0 && bps <= 2000) {
+    bps *= 1000;
+  }
+  if (bps != 125000 && bps != 250000 && bps != 500000 && bps != 1000000) {
+    Serial.println("CANA RATE 125000|250000|500000|1000000");
+    return;
+  }
+  canARateBps = bps;
+  savePushPrefs();
+  canAOk = false;
+  canAOk = startCanA();
+  evt("CAN A rate set %luk → %s", static_cast<unsigned long>(bps / 1000),
+      canAOk ? "ok" : "FAIL");
+}
+
+// CANA SCAN: 차가 깨어 있을 때 125k→250k→500k→1M 을 1초씩 들어보고 어느
+// 속도에서 에러 없는 프레임(efmsg)이 잡히는지 보여 준다. 끝나면 원래 속도로.
+void scanCanARates() {
+  static const uint32_t kRates[] = {125000, 250000, 500000, 1000000};
+  const uint32_t saved = canARateBps;
+  Serial.println("CANA SCAN: 각 속도 1초 (차가 깨어 있어야 의미 있음)");
+  canAOk = false;
+  for (uint32_t r : kRates) {
+    canARateBps = r;
+    if (!canA.begin(CANFD::BITRATE(r, 1))) {
+      Serial.printf("  %4luk: init FAIL\n", static_cast<unsigned long>(r / 1000));
+      continue;
+    }
+    McpDiag d;
+    canA.diag(d, true); // 카운터 0 으로
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 1000) {
+      drainCanQueue(); // B 큐가 차지 않게
+      delay(10);
+    }
+    if (!canA.diag(d, false)) {
+      Serial.printf("  %4luk: diag busy\n", static_cast<unsigned long>(r / 1000));
+      continue;
+    }
+    const bool anyErr = d.stuffErr || d.formErr || d.crcErr || d.bit0Err ||
+                        d.bit1Err || d.nrerr > 0;
+    Serial.printf("  %4luk: efmsg=%u rxerr=%u stuff=%u form=%u crc=%u bit1=%u rec=%u → %s\n",
+                  static_cast<unsigned long>(r / 1000), d.efmsg, d.nrerr,
+                  d.stuffErr, d.formErr, d.crcErr, d.bit1Err, d.rec,
+                  (d.efmsg > 0 && !anyErr) ? "이 속도가 맞음"
+                  : d.efmsg > 0             ? "프레임은 잡히나 에러도 있음"
+                  : anyErr                  ? "에러만 (속도 다름)"
+                                            : "조용함");
+  }
+  canARateBps = saved;
+  canAOk = startCanA();
+  Serial.printf("scan end, back to %luk (%s). 바꾸려면 CANA RATE <bps>\n",
+                static_cast<unsigned long>(saved / 1000), canAOk ? "ok" : "FAIL");
 }
 
 bool startCanB() {

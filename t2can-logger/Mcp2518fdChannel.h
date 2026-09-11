@@ -33,6 +33,8 @@ class Mcp2518fdChannel : public CanChannel {
   Mcp2518fdChannel(int cs, int sclk, int miso, int mosi, int intPin)
       : _cs(cs), _sclk(sclk), _miso(miso), _mosi(mosi), _int(intPin), _can(cs) {}
 
+  // speed 는 CANFD::BITRATE(bps, factor). 다시 불러 속도를 바꿀 수 있다
+  // (수신 태스크는 뮤텍스에 막혀 그동안 프레임을 못 읽는다).
   bool begin(uint32_t speed) override;
   bool receive(CanFrame &out) override;
   const char *name() const override { return "MCP2518FD(A)"; }
@@ -41,11 +43,23 @@ class Mcp2518fdChannel : public CanChannel {
   // 다음 호출까지의 증가분만 보게 한다. 수신 태스크와 SPI 를 나눠 쓰므로 뮤텍스.
   bool diag(McpDiag &d, bool clearCounters);
 
+  // begin() 때 Time Base Counter 로 실측한 MCP2518FD SYSCLK(=크리스털) 주파수.
+  // 0 이면 측정 실패. Longan 라이브러리는 기본 20MHz 로 비트타이밍을 계산하는데
+  // T-2CAN FD 는 40MHz 크리스털이라, 이 값으로 라이브러리에 맞는 클럭을 고른다.
+  uint32_t sysClockHz() const { return _sysClkHz; }
+  // 라이브러리에 넘긴 클럭 (MHz). 측정에 실패하면 회로도 값 40.
+  uint8_t clockMhz() const { return _clockMhz; }
+
  private:
   uint32_t rawRead(uint16_t addr);
   void rawWrite(uint16_t addr, uint32_t v);
+  void rawReset();
+  uint32_t measureSysClockHz();
+  void readDiagLocked(McpDiag &d, bool clearCounters);
 
   int _cs, _sclk, _miso, _mosi, _int;
   mcp2518fd _can;
   SemaphoreHandle_t _mux = nullptr;
+  uint32_t _sysClkHz = 0;
+  uint8_t _clockMhz = 40;
 };
