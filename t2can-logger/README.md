@@ -77,7 +77,11 @@ LOG RATE 50       20Hz (~100KB/s, 플래시가 못 따라가 drop 생김)
 LOG RATE 0        전부 (테스트용, 곧 drop·재시작)
 ```
 
-`hb` 줄에서 확인: `B+NNNN` 받은 프레임, `skip=` 간격 제한으로 건너뛴 수, `drop=` 큐가 넘쳐 잃은 수(0 이어야 함), `q=NN%` 큐 사용률, `wr=NNKB/s` 플래시 쓰기 속도. `drop` 이 계속 늘면 `LOG RATE` 를 늘리세요.
+`hb` 줄에서 확인: `B+NNNN` 받은 프레임, `skip=` 간격 제한으로 건너뛴 수, `drop=` 큐가 넘쳐 잃은 수(0 이어야 함), `Bmiss=` 수신 링이 꽉 차 버린 수, `Bover=` CAN 컨트롤러 FIFO 가 넘쳐 **하드웨어에서** 잃은 수, `Berr=` CAN B 버스 에러 인터럽트 누계, `q=NN%` 큐 사용률, `wr=NNKB/s` 플래시 쓰기 속도. `drop` 이 계속 늘면 `LOG RATE` 를 늘리세요.
+
+### CAN B 수신 — 플래시 쓰기 중에도 받기
+
+ESP32 는 플래시에 쓰는 동안(섹터당 20~45ms) 캐시를 끄고, 플래시에 있는 인터럽트 핸들러를 전부 멈춥니다. Arduino 빌드의 IDF TWAI 드라이버 ISR 이 그런 핸들러라서, 그동안 컨트롤러의 64바이트 RX FIFO(5프레임)는 2ms 만에 넘쳤습니다 — 2026-09-10 주행에서 `Bover` 가 받은 프레임의 30% 였습니다. 그래서 CAN B 는 IDF 드라이버를 쓰지 않고 **레지스터 직접 제어 + IRAM 인터럽트**(`TwaiChannel.cpp`)로 받습니다. ISR 은 내부 RAM 링(1024프레임)에만 쓰므로 플래시 쓰기 중에도 계속 돕니다. 수신 시각도 ISR 이 찍기 때문에 CSV 의 `ms` 는 처리 시각이 아니라 실제 수신 시각입니다. 송신 경로는 없고 리슨온리(ACK 도 안 냄)입니다.
 
 ### 1) USB 로 보드에 쌓인 파일 받기 (주행 후)
 
@@ -91,7 +95,7 @@ pip install -r requirements.txt
 python pull_log.py --port COM5
 ```
 
-`canlog-날짜.csv` 가 생깁니다. Excel, 메모장, [SavvyCAN](https://www.savvycan.com) 에서 열면 됩니다.
+`canlog-날짜.csv` 가 생깁니다. Excel, 메모장, [SavvyCAN](https://www.savvycan.com) 에서 열면 됩니다. 덤프 중 PC 가 10초 넘게 읽지 않으면 보드가 `!! host stopped reading — dump aborted` 를 찍고 멈춥니다(그전 버전은 바이트를 조용히 버려 CSV 줄이 깨졌습니다).
 
 다른 명령: `STAT` 상태, `CLEAR` 로그 삭제, `ECHO ON` 실시간 출력.
 

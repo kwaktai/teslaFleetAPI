@@ -113,10 +113,12 @@ struct IdStamp {
   uint32_t id;
   uint32_t ms;
 };
-static uint32_t lastStdA[2048];
-static uint32_t lastStdB[2048];
-static IdStamp lastExtA[256];
-static IdStamp lastExtB[256];
+// 20KB. 내부 RAM 을 아끼려고 PSRAM 에 두고(setup 에서 할당), 없으면 내부.
+static uint32_t *lastStdA = nullptr;
+static uint32_t *lastStdB = nullptr;
+static IdStamp *lastExtA = nullptr;
+static IdStamp *lastExtB = nullptr;
+
 
 // 두 태스크(loop, push)가 FFat 파일을 함께 만지므로: 로그 파일 교체/삭제와
 // 업로드용 읽기는 fsMux, 기기 로그 쓰기는 evtMux, NVS 는 prefsMux 로 나눈다.
@@ -370,8 +372,15 @@ const char *wifiReasonText(uint8_t r) {
     case 7: return "NOT_ASSOCED";
     case 8: return "ASSOC_LEAVE (보드가 스스로 끊음 — 재접속/망 전환)";
     case 9: return "ASSOC_NOT_AUTHED";
+    case 12: return "BSS_TRANSITION_DISASSOC (AP 가 다른 AP 로 옮기라고 함)";
+    case 14: return "MIC_FAILURE";
     case 15: return "4WAY_HANDSHAKE_TIMEOUT (비밀번호 틀림 또는 AP 응답 지연)";
+    case 16: return "GROUP_KEY_UPDATE_TIMEOUT";
     case 23: return "802_1X_AUTH_FAILED";
+    case 24: return "CIPHER_SUITE_REJECTED";
+    case 34: return "MISSING_ACKS (AP 가 응답 안 함)";
+    case 36: return "STA_LEAVING (보드가 다음 후보 망으로 넘어감)";
+    case 39: return "TIMEOUT";
     case 200: return "BEACON_TIMEOUT (AP 신호가 끊김 — 거리/전원/AP 재시작)";
     case 201: return "NO_AP_FOUND (AP 가 안 보임)";
     case 202: return "AUTH_FAIL (인증 실패 — 비밀번호)";
@@ -834,9 +843,24 @@ bool appendLine(const char *line) {
   return true;
 }
 
+static void *tableAlloc(size_t bytes) {
+  void *p = psramFound() ? ps_calloc(1, bytes) : nullptr;
+  if (!p) {
+    p = calloc(1, bytes);
+  }
+  return p;
+}
+
+static void allocRateTables() {
+  lastStdA = static_cast<uint32_t *>(tableAlloc(2048 * sizeof(uint32_t)));
+  lastStdB = static_cast<uint32_t *>(tableAlloc(2048 * sizeof(uint32_t)));
+  lastExtA = static_cast<IdStamp *>(tableAlloc(256 * sizeof(IdStamp)));
+  lastExtB = static_cast<IdStamp *>(tableAlloc(256 * sizeof(IdStamp)));
+}
+
 // ID 별 간격 제한. 수신 태스크에서만 부른다.
 bool rateAllows(char bus, uint32_t id, bool extended, uint32_t now) {
-  if (logRateMs == 0) {
+  if (logRateMs == 0 || !lastStdA || !lastExtA) {
     return true;
   }
   if (!extended && id < 2048) {
@@ -893,12 +917,13 @@ void maybeNtp() {
   }
 }
 
-void logFrame(char bus, uint32_t id, uint8_t len, const uint8_t *data) {
+// ms: 수신 시각(ISR 이 찍은 값). 0 이면 지금.
+void logFrame(char bus, uint32_t id, uint8_t len, const uint8_t *data, uint32_t ms) {
   char when[24];
   fillKst(when, sizeof(when));
   char line[256];
   int pos = snprintf(line, sizeof(line), "%s,%lu,%c,%03lX,%u,", when,
-                     static_cast<unsigned long>(millis()), bus,
+                     static_cast<unsigned long>(ms ? ms : millis()), bus,
                      static_cast<unsigned long>(id), len);
   if (pos < 0 || pos >= static_cast<int>(sizeof(line))) {
     dropped = dropped + 1;
@@ -1833,13 +1858,14 @@ void heartbeat() {
   const size_t qFree = canQueue ? xMessageBufferSpacesAvailable(canQueue) : 0;
   const unsigned qUsedPct =
       canQueueBytes ? static_cast<unsigned>(100 - (qFree * 100) / canQueueBytes) : 0;
-  evt("hb A+%lu B+%lu skip=%lu drop=%lu Bmiss=%lu Bover=%lu q=%u%% wr=%luKB/s "
+  evt("hb A+%lu B+%lu skip=%lu drop=%lu Bmiss=%lu Bover=%lu Berr=%lu q=%u%% wr=%luKB/s "
       "log=%s:%u wifi=%s ssid=%s rssi=%d wifi_down=%lu push=%s ok=%lu fail=%lu last=%d "
       "sent=%u heap=%u",
       static_cast<unsigned long>(dA), static_cast<unsigned long>(dB),
       static_cast<unsigned long>(rateSkipped),
       static_cast<unsigned long>(dropped), static_cast<unsigned long>(twaiMissed),
-      static_cast<unsigned long>(twaiOverrun), qUsedPct,
+      static_cast<unsigned long>(twaiOverrun),
+      static_cast<unsigned long>(canB.errorInterrupts()), qUsedPct,
       static_cast<unsigned long>(dW / 1024 / secs), activePath(),
       static_cast<unsigned>(logFile ? logFile.size() + lineUsed : 0),
       wifiOn ? (sta ? "sta" : (staSearching ? "search" : "ap")) : "off",
@@ -1854,6 +1880,43 @@ void heartbeat() {
   evt("%s", buf);
 }
 
+// USB CDC 는 보드 쪽 버퍼(8KB)가 꽉 찼을 때 setTxTimeoutMs 만큼만 기다리고
+// 나머지를 버린다. 평소 20ms 는 로그 줄이 loop 를 막지 않게 하는 값이지만,
+// DUMP 처럼 수 MB 를 흘릴 때는 PC 가 잠깐만 늦게 읽어도 바이트가 빠져
+// CSV 줄이 깨졌다 (2026-09-11 덤프에서 92줄). 덤프 중에는 넉넉히 기다리고,
+// 그래도 못 보내면(PC 가 안 읽음) 덤프를 중단한다.
+struct DumpGuard {
+  DumpGuard() { Serial.setTxTimeoutMs(500); }
+  ~DumpGuard() { Serial.setTxTimeoutMs(20); }
+};
+
+// HWCDC 는 버퍼가 꽉 차면 timeout×20 까지 기다렸다가 덜 보낸 길이를
+// 돌려준다(short write). 그건 PC 가 10초 넘게 안 읽은 것이므로 중단.
+bool serialWriteAll(const uint8_t *buf, size_t n) {
+  return Serial.write(buf, n) == n;
+}
+
+// 파일을 시리얼로 흘린다. 호스트가 읽지 않으면 중단하고 false.
+bool streamOpenFile(File &f) {
+  uint8_t buf[512];
+  bool ok = true;
+  while (f.available()) {
+    const int n = f.read(buf, sizeof(buf));
+    if (n <= 0) {
+      break;
+    }
+    if (!serialWriteAll(buf, static_cast<size_t>(n))) {
+      ok = false;
+      break;
+    }
+  }
+  f.close();
+  if (!ok) {
+    Serial.println("\n!! host stopped reading — dump aborted");
+  }
+  return ok;
+}
+
 void streamEventsToSerial(bool all) {
   File f = FFat.open(kEvtPath, FILE_READ);
   if (!f) {
@@ -1866,29 +1929,16 @@ void streamEventsToSerial(bool all) {
     while (f.available() && f.read() != '\n') {
     }
   }
-  uint8_t buf[256];
-  while (f.available()) {
-    const int n = f.read(buf, sizeof(buf));
-    if (n > 0) {
-      Serial.write(buf, n);
-    }
-  }
-  f.close();
+  streamOpenFile(f);
 }
 
 void dumpEvents(bool all) {
+  DumpGuard g;
   Serial.println("---EVT-BEGIN---");
   if (all) {
     File old = FFat.open(kEvtOld, FILE_READ);
     if (old) {
-      uint8_t buf[256];
-      while (old.available()) {
-        const int n = old.read(buf, sizeof(buf));
-        if (n > 0) {
-          Serial.write(buf, n);
-        }
-      }
-      old.close();
+      streamOpenFile(old);
     }
   }
   streamEventsToSerial(all);
@@ -1908,17 +1958,11 @@ void streamFileToSerial(const char *path) {
   if (!f) {
     return;
   }
-  uint8_t buf[256];
-  while (f.available()) {
-    const int n = f.read(buf, sizeof(buf));
-    if (n > 0) {
-      Serial.write(buf, n);
-    }
-  }
-  f.close();
+  streamOpenFile(f);
 }
 
 void dumpFiles() {
+  DumpGuard g;
   bc(PH_DUMP);
   flushLog();
   syncLog(true);
@@ -2126,11 +2170,11 @@ bool pollOne(CanChannel &ch, bool ok, char bus, volatile uint32_t &total) {
       continue;
     }
     total = total + 1;
-    if (!rateAllows(bus, f.id, f.extended, millis())) {
+    if (!rateAllows(bus, f.id, f.extended, f.ms ? f.ms : millis())) {
       rateSkipped = rateSkipped + 1;
       continue;
     }
-    logFrame(bus, f.id, f.len, f.data);
+    logFrame(bus, f.id, f.len, f.data, f.ms);
   }
   return got;
 }
@@ -2391,6 +2435,7 @@ void setup() {
   reportCoreDump();
 
   bc(PH_SETUP_CAN);
+  allocRateTables();
   canAOk = startCanA();
   canBOk = startCanB();
   startCanTask();
